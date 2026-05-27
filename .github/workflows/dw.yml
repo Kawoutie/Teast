@@ -158,3 +158,427 @@ jobs:
           git add .trigger
           git commit -m "Trigger download"
           git push
+          ```
+          BOOTSTRAP
+          fi
+          if [ ! -f INDEX.md ]; then
+            cat > INDEX.md << 'INDEX'
+          # Content Index
+          
+          ## Downloads
+          See [history/README.md](history/README.md) for all downloads.
+          
+          ## Structure
+          - `downloads/` - Downloaded files organized by session
+          - `history/` - Download manifests, links, and stats
+          - `.cache/` - Aria2 session data for resuming
+          - `.trigger.template` - Template for trigger-based downloads
+          INDEX
+          fi
+          if [ ! -f .gitattributes ]; then
+            echo "*.7z.* binary delta=off" > .gitattributes
+          fi
+
+      - name: Parse input and classify URLs
+        run: |
+          SESSION_ID=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M)
+          TIMESTAMP=$(TZ='Asia/Tehran' date '+%Y-%m-%d %H:%M')
+          echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          
+          echo "[INFO] Parsing links..."
+          LINKS="${{ env.links }}"
+          echo "$LINKS" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "  -> $line"
+          done
+          
+          LINK_COUNT=$(echo "$LINKS" | grep -c . || echo 0)
+          echo "[INFO] Parsed $LINK_COUNT links"
+          echo "[INFO] Session: $SESSION_ID"
+          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          if [ "$LINK_COUNT" -eq 0 ]; then
+            echo "[INFO] No links to download, exiting"
+            exit 0
+          fi
+
+      - name: Setup process-file.sh
+        run: |
+          mkdir -p .cache
+          cat > .cache/process-file.sh << 'PROCSCRIPT'
+          #!/bin/bash
+          # $1 = GID, $2 = number of files, $3 = file path
+          SESSION_ID="$4"
+          
+          NAME=$(basename "$3" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          FOLDER="${SESSION_ID}_${NAME%.*}"
+          
+          echo "[PROCESS] $NAME — processing"
+          
+          mkdir -p downloads/$FOLDER
+          mv "$3" downloads/$FOLDER/
+          
+          SIZE=$(stat -c%s "downloads/$FOLDER/$NAME" 2>/dev/null || echo 0)
+          
+          if [ $SIZE -gt 104857600 ]; then
+            echo "[PROCESS] $NAME — $SIZE, splitting into 99MB parts"
+            cd downloads/$FOLDER
+            7z a -mx=0 -mmt=on -v99m "${NAME%.*}.7z" "$NAME"
+            rm "$NAME"
+            cd ../..
+            echo "[PROCESS] $NAME — split complete"
+          else
+            echo "[PROCESS] $NAME — $SIZE, no split needed"
+          fi
+          
+          sha256sum downloads/$FOLDER/* > downloads/$FOLDER/SHA256SUMS 2>/dev/null
+          git add downloads/$FOLDER/ 2>/dev/null
+          
+          echo $SIZE >> /tmp/batch_bytes
+          echo "Processed: $SIZE" >> /tmp/processed_sizes
+          echo "$FOLDER" >> /tmp/processed_folders
+          PROCScript
+          chmod +x .cache/process-file.sh
+
+      - name: Prepare aria2 input
+        run: |
+          echo "Classifying URLs..."
+          TORRENT_LINKS=""
+          DIRECT_LINKS=""
+          TORRENT_FILES=""
+          
+          echo "${{ env.links }}" | while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            url=$(echo "$url" | xargs)
+            
+            if echo "$url" | grep -qi "^magnet:"; then
+              echo "$url" >> /tmp/aria2_torrent.txt
+              echo "magnet" >> /tmp/url_types.txt
+            elif echo "$url" | grep -qi "\.torrent$"; then
+              echo "$url" >> /tmp/aria2_torrent_files.txt
+              echo "torrent_file" >> /tmp/url_types.txt
+            else
+              echo "$url" >> /tmp/aria2_direct.txt
+              echo "direct" >> /tmp/url_types.txt
+            fi
+          done
+          
+          # Download torrent files first
+          if [ -f /tmp/aria2_torrent_files.txt ]; then
+            while IFS= read -r torurl; do
+              [ -z "$torurl" ] && continue
+              torfile="/tmp/torrent_$(date +%s%N).torrent"
+              echo "[INFO] Downloading torrent file: $torurl"
+              curl -sL "$torurl" -o "$torfile"
+              echo "$torfile" >> /tmp/aria2_torrent.txt
+            done < /tmp/aria2_torrent_files.txt
+          fi
+          
+          # Combine all links for aria2
+          cat /tmp/aria2_direct.txt /tmp/aria2_torrent.txt 2>/dev/null > /tmp/aria2_input.txt
+          rm -f /tmp/aria2_direct.txt /tmp/aria2_torrent.txt /tmp/aria2_torrent_files.txt
+          
+          URL_COUNT=$(wc -l < /tmp/url_types.txt 2>/dev/null || echo 0)
+          echo "URL_COUNT=$URL_COUNT" >> $GITHUB_ENV
+
+      - name: Run aria2 downloads
+        run: |
+          if [ ! -f /tmp/aria2_input.txt ] || [ ! -s /tmp/aria2_input.txt ]; then
+            echo "[INFO] No valid links to download"
+            exit 0
+          fi
+          
+          echo 0 > /tmp/batch_bytes
+          echo 1 > /tmp/batch_num
+          echo "" > /tmp/processed_sizes
+          echo "" > /tmp/processed_folders
+          echo "" > /tmp/download_results
+          
+          mkdir -p "$RUNNER_TEMP/downloads/$SESSION_ID"
+          
+          echo "[INFO] Starting downloads..."
+          echo "[DOWNLOAD] $(wc -l < /tmp/aria2_input.txt) files queued"
+          
+          if [ -f .cache/aria2_session.txt ]; then
+            cp .cache/aria2_session.txt /tmp/aria2_session.txt
+          fi
+          
+          aria2c \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=1M \
+            --bt-max-peers=0 \
+            --seed-time=0 \
+            --seed-ratio=0 \
+            --continue=true \
+            --file-allocation=none \
+            --disk-cache=64M \
+            --save-session=/tmp/aria2_session.txt \
+            --input-file=/tmp/aria2_input.txt \
+            --dir="$RUNNER_TEMP/downloads/$SESSION_ID" \
+            --on-download-error=continue \
+            --on-download-complete=".cache/process-file.sh" \
+            --on-download-complete-param="$SESSION_ID" \
+            --console-log-level=notice \
+            2>&1 | tee /tmp/aria2_log.txt || ARIA2_EXIT=$?
+          
+          ARIA2_EXIT=${ARIA2_EXIT:-$?}
+          echo "ARIA2_EXIT=$ARIA2_EXIT" >> $GITHUB_ENV
+          
+          # Save session
+          if [ -f /tmp/aria2_session.txt ]; then
+            cp /tmp/aria2_session.txt .cache/aria2_session.txt
+          fi
+          
+          # Process remaining files in temp directory
+          find "$RUNNER_TEMP/downloads/$SESSION_ID" -type f 2>/dev/null | while read f; do
+            if [ -f "$f" ]; then
+              echo "Processing leftover: $f"
+              bash .cache/process-file.sh "0" "1" "$f" "$SESSION_ID"
+            fi
+          done
+
+      - name: Apply structure mode for torrents
+        if: env.structure_mode == 'archive'
+        run: |
+          echo "[INFO] Applying archive structure mode for torrents"
+          for folder in downloads/${SESSION_ID}_*; do
+            [ ! -d "$folder" ] && continue
+            # Check if it contains torrent-related files
+            if ls "$folder"/*.torrent 2>/dev/null || [ -f "$folder/.torrent" ]; then
+              echo "[ARCHIVE] Archiving $folder"
+              foldername=$(basename "$folder")
+              if [ ! -f "${folder}.7z" ]; then
+                cd downloads
+                7z a -mx=0 -mmt=on -v99m "${foldername}.7z" "$foldername"
+                rm -rf "$foldername"
+                git add "${foldername}.7z"* 2>/dev/null
+                cd ..
+              fi
+            fi
+          done
+
+      - name: Batch commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          STORAGE_MODE="${{ env.storage_mode }}"
+          SESSION_ID="${{ env.SESSION_ID }}"
+          BATCH_NUM=1
+          ORIGINAL_BRANCH="${{ github.ref_name }}"
+          
+          if [ "$STORAGE_MODE" = "branch" ]; then
+            git checkout --orphan "sessions/$SESSION_ID"
+            git rm -rf --cached . 2>/dev/null || true
+          fi
+          
+          # Check if there's anything to commit
+          STAGED=$(git diff --cached --name-only 2>/dev/null | wc -l)
+          
+          if [ "$STAGED" -gt 0 ]; then
+            TOTAL_STAGED=$(git diff --cached --diff-filter=A --stat 2>/dev/null | tail -1 | awk '{print $1}' || echo 0)
+            echo "[COMMIT] Final — ${TOTAL_STAGED:-unknown} pushed"
+            git commit -m "Session $SESSION_ID — Complete ($TOTAL_STAGED bytes)" || echo "Nothing to commit"
+            git push origin "$(git rev-parse --abbrev-ref HEAD)" --force 2>/dev/null || git push origin "$(git rev-parse --abbrev-ref HEAD)"
+          fi
+          
+          if [ "$STORAGE_MODE" = "branch" ]; then
+            git checkout "$ORIGINAL_BRANCH" 2>/dev/null || git checkout main
+          fi
+
+      - name: Generate history files
+        run: |
+          SESSION_ID="${{ env.SESSION_ID }}"
+          TIMESTAMP="${{ env.TIMESTAMP }}"
+          STORAGE_MODE="${{ env.storage_mode }}"
+          BRANCH="${{ github.ref_name }}"
+          
+          if [ "$STORAGE_MODE" = "branch" ]; then
+            BRANCH="sessions/$SESSION_ID"
+          fi
+          
+          mkdir -p history/$SESSION_ID
+          
+          # Determine source types
+          SOURCE_TYPE="direct"
+          if grep -qi "magnet:" <<< "${{ env.links }}" || grep -qi "\.torrent" <<< "${{ env.links }}"; then
+            SOURCE_TYPE="torrent"
+          fi
+          
+          # Count files and calculate totals
+          DOWNLOAD_FOLDERS=$(ls -d downloads/${SESSION_ID}_* 2>/dev/null || true)
+          TOTAL_SIZE=0
+          FILE_COUNT=0
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+          
+          echo "[]" > /tmp/manifest_files.json
+          
+          for folder in $DOWNLOAD_FOLDERS; do
+            [ ! -d "$folder" ] && continue
+            FOLDER_NAME=$(basename "$folder")
+            
+            find "$folder" -type f ! -name "SHA256SUMS" ! -name "download.sh" | while read file; do
+              FILENAME=$(basename "$file")
+              SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
+              HASH=$(grep "$FILENAME" "$folder/SHA256SUMS" 2>/dev/null | awk '{print $1}' || echo "unknown")
+              
+              echo "{\"name\": \"$FILENAME\", \"sha256\": \"$HASH\", \"size_bytes\": $SIZE}" >> /tmp/manifest_files.json
+              echo $SIZE >> /tmp/total_sizes
+              echo 1 >> /tmp/file_counts
+            done
+          done
+          
+          if [ -f /tmp/total_sizes ]; then
+            TOTAL_SIZE=$(paste -sd+ /tmp/total_sizes | bc)
+          fi
+          if [ -f /tmp/file_counts ]; then
+            FILE_COUNT=$(wc -l < /tmp/file_counts)
+          fi
+          
+          # Count successes/failures
+          SUCCESS_COUNT=$FILE_COUNT
+          ARIA2_EXIT="${{ env.ARIA2_EXIT }}"
+          if [ "$ARIA2_EXIT" != "0" ]; then
+            SUCCESS_COUNT=$((FILE_COUNT - 1))
+            FAILED_COUNT=1
+          fi
+          
+          STATUS="success"
+          [ $FAILED_COUNT -gt 0 ] && STATUS="partial"
+          [ $SUCCESS_COUNT -eq 0 ] && STATUS="failed"
+          
+          # Build manifest files array
+          MANIFEST_FILES="[$(cat /tmp/manifest_files.json 2>/dev/null | grep -v '^\[' | paste -sd, -)]"
+          [ "$MANIFEST_FILES" = "[" ] && MANIFEST_FILES="[]"
+          
+          # Create manifest.json
+          cat > history/$SESSION_ID/manifest.json << MANIFEST
+          {
+            "id": "$SESSION_ID",
+            "timestamp": "$TIMESTAMP",
+            "folder": "downloads/${SESSION_ID}_*",
+            "source": "$SOURCE_TYPE",
+            "size_bytes": $TOTAL_SIZE,
+            "status": "$STATUS",
+            "files": $MANIFEST_FILES
+          }
+          MANIFEST
+          
+          # Create links.txt
+          REPO="${{ github.repository }}"
+          echo "# Download Links for Session $SESSION_ID" > history/$SESSION_ID/links.txt
+          echo "# Timestamp: $TIMESTAMP" >> history/$SESSION_ID/links.txt
+          echo "" >> history/$SESSION_ID/links.txt
+          
+          for folder in $DOWNLOAD_FOLDERS; do
+            [ ! -d "$folder" ] && continue
+            FOLDER_NAME=$(basename "$folder")
+            find "$folder" -type f ! -name "SHA256SUMS" ! -name "download.sh" | while read file; do
+              FILENAME=$(basename "$file")
+              echo "https://raw.githubusercontent.com/$REPO/$BRANCH/$folder/$FILENAME" >> history/$SESSION_ID/links.txt
+            done
+          done
+          
+          # Create download.sh in each download folder
+          for folder in $DOWNLOAD_FOLDERS; do
+            [ ! -d "$folder" ] && continue
+            FOLDER_NAME=$(basename "$folder")
+            cat > "$folder/download.sh" << DOWNSCRIPT
+          #!/bin/bash
+          REPO="https://github.com/$REPO.git"
+          BRANCH="${BRANCH:-main}"
+          FOLDER="downloads/$FOLDER_NAME"
+          echo "Cloning $FOLDER from $REPO (branch: \$BRANCH)..."
+          git clone --depth 1 --filter=blob:none --no-checkout \$REPO tmp-\$\$
+          cd tmp-\$\$ && git sparse-checkout init --cone
+          git sparse-checkout set \$FOLDER
+          git checkout
+          echo "Done: tmp-\$\$/\$FOLDER"
+          DOWNSCRIPT
+            chmod +x "$folder/download.sh"
+          done
+          
+          echo "TOTAL_SIZE=$TOTAL_SIZE" >> $GITHUB_ENV
+          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          echo "STATUS=$STATUS" >> $GITHUB_ENV
+          echo "SOURCE_TYPE=$SOURCE_TYPE" >> $GITHUB_ENV
+
+      - name: Update history README
+        run: |
+          SESSION_ID="${{ env.SESSION_ID }}"
+          TIMESTAMP="${{ env.TIMESTAMP }}"
+          TOTAL_SIZE="${{ env.TOTAL_SIZE }}"
+          FILE_COUNT="${{ env.FILE_COUNT }}"
+          STATUS="${{ env.STATUS }}"
+          SOURCE_TYPE="${{ env.SOURCE_TYPE }}"
+          
+          STATUS_ICON="🔴"
+          [ "$STATUS" = "partial" ] && STATUS_ICON="🟡"
+          [ "$STATUS" = "success" ] && STATUS_ICON="🟢"
+          
+          HUMAN_SIZE=$(numfmt --to=iec $TOTAL_SIZE 2>/dev/null || echo "${TOTAL_SIZE}B")
+          ENTRY="\n## ${STATUS_ICON} Session $SESSION_ID — $HUMAN_SIZE — $TIMESTAMP\n"
+          ENTRY="${ENTRY}**Source:** $SOURCE_TYPE | **Parts:** $FILE_COUNT\n"
+          ENTRY="${ENTRY}📁 [Files](../downloads/${SESSION_ID}_*/) | 📋 [Manifest]($SESSION_ID/manifest.json) | 📥 [Links]($SESSION_ID/links.txt)\n"
+          
+          # Insert after the header
+          if grep -q "## Sessions" history/README.md; then
+            sed -i "/## Sessions/a\\${ENTRY}" history/README.md
+          else
+            echo -e "$ENTRY" >> history/README.md
+          fi
+
+      - name: Generate badge SVG
+        run: |
+          TOTAL_SIZE="${{ env.TOTAL_SIZE }}"
+          FILE_COUNT="${{ env.FILE_COUNT }}"
+          HUMAN_SIZE=$(numfmt --to=iec $TOTAL_SIZE 2>/dev/null || echo "${TOTAL_SIZE}B")
+          
+          cat > history/badge.svg << SVG
+          <svg xmlns="http://www.w3.org/2000/svg" width="320" height="40">
+            <rect width="320" height="40" fill="#1a1a2e" rx="6"/>
+            <text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">
+              📦 ${HUMAN_SIZE}  |  📂 ${FILE_COUNT} downloads
+            </text>
+          </svg>
+          SVG
+
+      - name: Commit history and cleanup
+        run: |
+          git add history/
+          git add .cache/aria2_session.txt 2>/dev/null || true
+          git add downloads/*/download.sh 2>/dev/null || true
+          git add .gitattributes .trigger.template BOOTSTRAP.md INDEX.md 2>/dev/null || true
+          
+          # Remove .trigger if it exists
+          if [ -f .trigger ]; then
+            git rm .trigger 2>/dev/null || rm .trigger
+          fi
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if ! git diff --cached --quiet 2>/dev/null; then
+            git commit -m "History update for session ${{ env.SESSION_ID }}"
+            git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
+            git push origin ${{ github.ref_name }}
+          fi
+
+      - name: Summary
+        run: |
+          echo "═══════════════════════════════════"
+          echo "  DOWNLOAD SESSION COMPLETE"
+          echo "═══════════════════════════════════"
+          echo "Session ID: ${{ env.SESSION_ID }}"
+          echo "Timestamp:  ${{ env.TIMESTAMP }}"
+          echo "Status:     ${{ env.STATUS }}"
+          echo "Total Size: $(numfmt --to=iec ${{ env.TOTAL_SIZE }} 2>/dev/null || echo ${{ env.TOTAL_SIZE }}B)"
+          echo "Files:      ${{ env.FILE_COUNT }}"
+          echo "Storage:    ${{ env.storage_mode }}"
+          echo "Structure:  ${{ env.structure_mode }}"
+          echo ""
+          echo "[INFO] Complete — ${{ env.FILE_COUNT }} succeeded"
+          echo "═══════════════════════════════════"
