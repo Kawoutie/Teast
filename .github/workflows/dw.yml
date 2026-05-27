@@ -77,26 +77,47 @@ jobs:
           path: /usr/local/bin/
           key: tools-${{ hashFiles('.github/.tool_versions') }}
 
-      - name: Install tools (cache miss)
+      - name: Install tools
         if: steps.cache-tools.outputs.cache-hit != 'true'
         run: |
           mkdir -p .github
+          
           echo "Installing aria2..."
-          wget -q https://github.com/q3aql/aria2-static-builds/releases/latest/download/aria2c-linux-amd64 -O /usr/local/bin/aria2c
+          ARIA2_URL=$(wget -qO- https://api.github.com/repos/q3aql/aria2-static-builds/releases/latest 2>/dev/null | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url' 2>/dev/null)
+          if [ -z "$ARIA2_URL" ]; then
+            # Fallback to known version
+            ARIA2_URL="https://github.com/q3aql/aria2-static-builds/releases/download/v1.37.0/aria2c-linux-amd64"
+          fi
+          wget -q "$ARIA2_URL" -O /usr/local/bin/aria2c || {
+            echo "Failed to download aria2, trying apt..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq aria2 && cp $(which aria2c) /usr/local/bin/aria2c
+          }
           chmod +x /usr/local/bin/aria2c
           ARIA2_VER=$(aria2c --version 2>&1 | head -1 | awk '{print $3}')
           echo "aria2 $ARIA2_VER"
 
           echo "Installing 7z..."
-          wget -q https://7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz
-          tar xf /tmp/7z.tar.xz -C /usr/local/bin/ 7zz
-          mv /usr/local/bin/7zz /usr/local/bin/7z
+          wget -q https://7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz || {
+            echo "Failed to download 7z, trying apt..."
+            sudo apt-get install -y -qq p7zip-full && cp $(which 7z) /usr/local/bin/7z
+          }
+          if [ -f /tmp/7z.tar.xz ]; then
+            tar xf /tmp/7z.tar.xz -C /usr/local/bin/ 7zz
+            mv /usr/local/bin/7zz /usr/local/bin/7z
+          fi
           chmod +x /usr/local/bin/7z
           SEVEN_Z_VER=$(7z i 2>&1 | grep "7-Zip" | head -1 | awk '{print $3}')
           echo "7z $SEVEN_Z_VER"
 
           echo "Installing jq..."
-          wget -q https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 -O /usr/local/bin/jq
+          JQ_URL=$(wget -qO- https://api.github.com/repos/jqlang/jq/releases/latest 2>/dev/null | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url' 2>/dev/null)
+          if [ -z "$JQ_URL" ]; then
+            JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+          fi
+          wget -q "$JQ_URL" -O /usr/local/bin/jq || {
+            echo "Failed to download jq, trying apt..."
+            sudo apt-get install -y -qq jq && cp $(which jq) /usr/local/bin/jq
+          }
           chmod +x /usr/local/bin/jq
           JQ_VER=$(jq --version 2>&1 | cut -d- -f2)
           echo "jq $JQ_VER"
@@ -108,16 +129,26 @@ jobs:
       - name: Verify tools (cache hit)
         if: steps.cache-tools.outputs.cache-hit == 'true'
         run: |
-          if [ ! -f /usr/local/bin/aria2c ] || [ ! -f /usr/local/bin/7z ] || [ ! -f /usr/local/bin/jq ]; then
-            echo "Cached binaries missing, forcing reinstall..."
+          MISSING=false
+          if [ ! -f /usr/local/bin/aria2c ]; then
+            echo "aria2c missing from cache"
+            MISSING=true
+          fi
+          if [ ! -f /usr/local/bin/7z ]; then
+            echo "7z missing from cache"
+            MISSING=true
+          fi
+          if [ ! -f /usr/local/bin/jq ]; then
+            echo "jq missing from cache"
+            MISSING=true
+          fi
+          if [ "$MISSING" = "true" ]; then
+            echo "Cached binaries incomplete, forcing reinstall..."
             rm -rf /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq .github/.tool_versions
             exit 1
           fi
           chmod +x /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq
-          echo "Tools verified from cache"
-          # Background check for updates
-          (wget -q -O /dev/null https://github.com/q3aql/aria2-static-builds/releases/latest && echo "aria2 update check complete") &
-          (wget -q -O /dev/null https://github.com/jqlang/jq/releases/latest && echo "jq update check complete") &
+          echo "All tools verified from cache"
 
       - name: First-run setup
         run: |
@@ -139,7 +170,7 @@ jobs:
           TEMPLATE
           fi
           if [ ! -f BOOTSTRAP.md ]; then
-            cat > BOOTSTRAP.md << 'BOOTSTRAP'
+            cat > BOOTSTRAP.md << BOOTSTRAPEOF
           # Bootstrap Instructions (Git-Only Access)
           
           Clone this repository and create a `.trigger` file:
@@ -159,7 +190,7 @@ jobs:
           git commit -m "Trigger download"
           git push
           ```
-          BOOTSTRAP
+          BOOTSTRAPEOF
           fi
           if [ ! -f INDEX.md ]; then
             cat > INDEX.md << 'INDEX'
@@ -238,22 +269,22 @@ jobs:
           echo $SIZE >> /tmp/batch_bytes
           echo "Processed: $SIZE" >> /tmp/processed_sizes
           echo "$FOLDER" >> /tmp/processed_folders
-          PROCScript
+          PROCSCRIPT
           chmod +x .cache/process-file.sh
 
       - name: Prepare aria2 input
         run: |
           echo "Classifying URLs..."
-          TORRENT_LINKS=""
-          DIRECT_LINKS=""
-          TORRENT_FILES=""
+          > /tmp/aria2_direct.txt
+          > /tmp/aria2_torrent_files.txt
+          > /tmp/url_types.txt
           
           echo "${{ env.links }}" | while IFS= read -r url; do
             [ -z "$url" ] && continue
             url=$(echo "$url" | xargs)
             
             if echo "$url" | grep -qi "^magnet:"; then
-              echo "$url" >> /tmp/aria2_torrent.txt
+              echo "$url" >> /tmp/aria2_torrent_files.txt
               echo "magnet" >> /tmp/url_types.txt
             elif echo "$url" | grep -qi "\.torrent$"; then
               echo "$url" >> /tmp/aria2_torrent_files.txt
@@ -264,46 +295,52 @@ jobs:
             fi
           done
           
-          # Download torrent files first
-          if [ -f /tmp/aria2_torrent_files.txt ]; then
+          # Download torrent files and combine
+          > /tmp/aria2_input.txt
+          
+          if [ -s /tmp/aria2_direct.txt ]; then
+            cat /tmp/aria2_direct.txt >> /tmp/aria2_input.txt
+          fi
+          
+          if [ -s /tmp/aria2_torrent_files.txt ]; then
             while IFS= read -r torurl; do
               [ -z "$torurl" ] && continue
-              torfile="/tmp/torrent_$(date +%s%N).torrent"
-              echo "[INFO] Downloading torrent file: $torurl"
-              curl -sL "$torurl" -o "$torfile"
-              echo "$torfile" >> /tmp/aria2_torrent.txt
+              if echo "$torurl" | grep -qi "^magnet:"; then
+                echo "$torurl" >> /tmp/aria2_input.txt
+              else
+                echo "[INFO] Downloading torrent file: $torurl"
+                torfile="/tmp/torrent_$(date +%s%N).torrent"
+                curl -sL "$torurl" -o "$torfile" && echo "$torfile" >> /tmp/aria2_input.txt
+              fi
             done < /tmp/aria2_torrent_files.txt
           fi
           
-          # Combine all links for aria2
-          cat /tmp/aria2_direct.txt /tmp/aria2_torrent.txt 2>/dev/null > /tmp/aria2_input.txt
-          rm -f /tmp/aria2_direct.txt /tmp/aria2_torrent.txt /tmp/aria2_torrent_files.txt
-          
-          URL_COUNT=$(wc -l < /tmp/url_types.txt 2>/dev/null || echo 0)
-          echo "URL_COUNT=$URL_COUNT" >> $GITHUB_ENV
+          INPUT_COUNT=$(wc -l < /tmp/aria2_input.txt 2>/dev/null || echo 0)
+          echo "INPUT_COUNT=$INPUT_COUNT" >> $GITHUB_ENV
 
       - name: Run aria2 downloads
         run: |
           if [ ! -f /tmp/aria2_input.txt ] || [ ! -s /tmp/aria2_input.txt ]; then
             echo "[INFO] No valid links to download"
+            echo "ARIA2_EXIT=0" >> $GITHUB_ENV
             exit 0
           fi
           
           echo 0 > /tmp/batch_bytes
-          echo 1 > /tmp/batch_num
           echo "" > /tmp/processed_sizes
           echo "" > /tmp/processed_folders
-          echo "" > /tmp/download_results
           
           mkdir -p "$RUNNER_TEMP/downloads/$SESSION_ID"
           
           echo "[INFO] Starting downloads..."
           echo "[DOWNLOAD] $(wc -l < /tmp/aria2_input.txt) files queued"
           
-          if [ -f .cache/aria2_session.txt ]; then
+          if [ -f .cache/aria2_session.txt ] && [ -s .cache/aria2_session.txt ]; then
             cp .cache/aria2_session.txt /tmp/aria2_session.txt
+            echo "[INFO] Resuming from previous session"
           fi
           
+          set +e
           aria2c \
             --max-connection-per-server=16 \
             --split=16 \
@@ -321,23 +358,29 @@ jobs:
             --on-download-complete=".cache/process-file.sh" \
             --on-download-complete-param="$SESSION_ID" \
             --console-log-level=notice \
-            2>&1 | tee /tmp/aria2_log.txt || ARIA2_EXIT=$?
+            2>&1 | tee /tmp/aria2_log.txt
+          ARIA2_EXIT=$?
+          set -e
           
-          ARIA2_EXIT=${ARIA2_EXIT:-$?}
           echo "ARIA2_EXIT=$ARIA2_EXIT" >> $GITHUB_ENV
           
-          # Save session
+          # Save session for resume
           if [ -f /tmp/aria2_session.txt ]; then
             cp /tmp/aria2_session.txt .cache/aria2_session.txt
           fi
           
-          # Process remaining files in temp directory
+          # Process any remaining files in temp directory
           find "$RUNNER_TEMP/downloads/$SESSION_ID" -type f 2>/dev/null | while read f; do
             if [ -f "$f" ]; then
               echo "Processing leftover: $f"
-              bash .cache/process-file.sh "0" "1" "$f" "$SESSION_ID"
+              bash .cache/process-file.sh "0" "1" "$f" "$SESSION_ID" || true
             fi
           done
+          
+          if [ $ARIA2_EXIT -ne 0 ]; then
+            echo "[WARNING] aria2 exited with code $ARIA2_EXIT"
+            echo "[INFO] Committing what was downloaded so far"
+          fi
 
       - name: Apply structure mode for torrents
         if: env.structure_mode == 'archive'
@@ -345,28 +388,21 @@ jobs:
           echo "[INFO] Applying archive structure mode for torrents"
           for folder in downloads/${SESSION_ID}_*; do
             [ ! -d "$folder" ] && continue
-            # Check if it contains torrent-related files
-            if ls "$folder"/*.torrent 2>/dev/null || [ -f "$folder/.torrent" ]; then
-              echo "[ARCHIVE] Archiving $folder"
-              foldername=$(basename "$folder")
-              if [ ! -f "${folder}.7z" ]; then
-                cd downloads
-                7z a -mx=0 -mmt=on -v99m "${foldername}.7z" "$foldername"
-                rm -rf "$foldername"
-                git add "${foldername}.7z"* 2>/dev/null
-                cd ..
-              fi
-            fi
+            foldername=$(basename "$folder")
+            echo "[ARCHIVE] Archiving $folder"
+            cd downloads
+            7z a -mx=0 -mmt=on -v99m "${foldername}.7z" "$foldername" && rm -rf "$foldername"
+            git add "${foldername}.7z"* 2>/dev/null
+            cd ..
           done
 
-      - name: Batch commit and push
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           STORAGE_MODE="${{ env.storage_mode }}"
           SESSION_ID="${{ env.SESSION_ID }}"
-          BATCH_NUM=1
           ORIGINAL_BRANCH="${{ github.ref_name }}"
           
           if [ "$STORAGE_MODE" = "branch" ]; then
@@ -374,14 +410,14 @@ jobs:
             git rm -rf --cached . 2>/dev/null || true
           fi
           
-          # Check if there's anything to commit
           STAGED=$(git diff --cached --name-only 2>/dev/null | wc -l)
           
           if [ "$STAGED" -gt 0 ]; then
-            TOTAL_STAGED=$(git diff --cached --diff-filter=A --stat 2>/dev/null | tail -1 | awk '{print $1}' || echo 0)
-            echo "[COMMIT] Final — ${TOTAL_STAGED:-unknown} pushed"
-            git commit -m "Session $SESSION_ID — Complete ($TOTAL_STAGED bytes)" || echo "Nothing to commit"
+            echo "[COMMIT] Final — committing $STAGED files"
+            git commit -m "Session $SESSION_ID — Complete"
             git push origin "$(git rev-parse --abbrev-ref HEAD)" --force 2>/dev/null || git push origin "$(git rev-parse --abbrev-ref HEAD)"
+          else
+            echo "[INFO] No files to commit"
           fi
           
           if [ "$STORAGE_MODE" = "branch" ]; then
@@ -401,20 +437,20 @@ jobs:
           
           mkdir -p history/$SESSION_ID
           
-          # Determine source types
+          # Determine source type
           SOURCE_TYPE="direct"
-          if grep -qi "magnet:" <<< "${{ env.links }}" || grep -qi "\.torrent" <<< "${{ env.links }}"; then
+          if grep -qi "magnet:\|\.torrent" <<< "${{ env.links }}"; then
             SOURCE_TYPE="torrent"
           fi
           
-          # Count files and calculate totals
+          # Calculate totals
           DOWNLOAD_FOLDERS=$(ls -d downloads/${SESSION_ID}_* 2>/dev/null || true)
           TOTAL_SIZE=0
           FILE_COUNT=0
-          SUCCESS_COUNT=0
-          FAILED_COUNT=0
           
-          echo "[]" > /tmp/manifest_files.json
+          # Build manifest files array
+          MANIFEST_ENTRIES=""
+          FIRST=true
           
           for folder in $DOWNLOAD_FOLDERS; do
             [ ! -d "$folder" ] && continue
@@ -425,34 +461,28 @@ jobs:
               SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
               HASH=$(grep "$FILENAME" "$folder/SHA256SUMS" 2>/dev/null | awk '{print $1}' || echo "unknown")
               
-              echo "{\"name\": \"$FILENAME\", \"sha256\": \"$HASH\", \"size_bytes\": $SIZE}" >> /tmp/manifest_files.json
+              echo "{\"name\": \"$FILENAME\", \"sha256\": \"$HASH\", \"size_bytes\": $SIZE}" >> /tmp/manifest_entries.json
               echo $SIZE >> /tmp/total_sizes
-              echo 1 >> /tmp/file_counts
             done
           done
           
           if [ -f /tmp/total_sizes ]; then
-            TOTAL_SIZE=$(paste -sd+ /tmp/total_sizes | bc)
+            TOTAL_SIZE=$(paste -sd+ /tmp/total_sizes | bc 2>/dev/null || echo 0)
           fi
-          if [ -f /tmp/file_counts ]; then
-            FILE_COUNT=$(wc -l < /tmp/file_counts)
+          if [ -f /tmp/manifest_entries.json ]; then
+            FILE_COUNT=$(wc -l < /tmp/manifest_entries.json)
+            MANIFEST_FILES="[$(paste -sd, /tmp/manifest_entries.json)]"
+          else
+            MANIFEST_FILES="[]"
           fi
           
-          # Count successes/failures
-          SUCCESS_COUNT=$FILE_COUNT
           ARIA2_EXIT="${{ env.ARIA2_EXIT }}"
-          if [ "$ARIA2_EXIT" != "0" ]; then
-            SUCCESS_COUNT=$((FILE_COUNT - 1))
-            FAILED_COUNT=1
-          fi
-          
           STATUS="success"
-          [ $FAILED_COUNT -gt 0 ] && STATUS="partial"
-          [ $SUCCESS_COUNT -eq 0 ] && STATUS="failed"
-          
-          # Build manifest files array
-          MANIFEST_FILES="[$(cat /tmp/manifest_files.json 2>/dev/null | grep -v '^\[' | paste -sd, -)]"
-          [ "$MANIFEST_FILES" = "[" ] && MANIFEST_FILES="[]"
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            STATUS="failed"
+          elif [ "$ARIA2_EXIT" != "0" ]; then
+            STATUS="partial"
+          fi
           
           # Create manifest.json
           cat > history/$SESSION_ID/manifest.json << MANIFEST
@@ -475,14 +505,12 @@ jobs:
           
           for folder in $DOWNLOAD_FOLDERS; do
             [ ! -d "$folder" ] && continue
-            FOLDER_NAME=$(basename "$folder")
             find "$folder" -type f ! -name "SHA256SUMS" ! -name "download.sh" | while read file; do
-              FILENAME=$(basename "$file")
-              echo "https://raw.githubusercontent.com/$REPO/$BRANCH/$folder/$FILENAME" >> history/$SESSION_ID/links.txt
+              echo "https://raw.githubusercontent.com/$REPO/$BRANCH/$file" >> history/$SESSION_ID/links.txt
             done
           done
           
-          # Create download.sh in each download folder
+          # Create download.sh in each folder
           for folder in $DOWNLOAD_FOLDERS; do
             [ ! -d "$folder" ] && continue
             FOLDER_NAME=$(basename "$folder")
@@ -491,7 +519,7 @@ jobs:
           REPO="https://github.com/$REPO.git"
           BRANCH="${BRANCH:-main}"
           FOLDER="downloads/$FOLDER_NAME"
-          echo "Cloning $FOLDER from $REPO (branch: \$BRANCH)..."
+          echo "Cloning \$FOLDER from \$REPO (branch: \$BRANCH)..."
           git clone --depth 1 --filter=blob:none --no-checkout \$REPO tmp-\$\$
           cd tmp-\$\$ && git sparse-checkout init --cone
           git sparse-checkout set \$FOLDER
@@ -520,14 +548,15 @@ jobs:
           [ "$STATUS" = "success" ] && STATUS_ICON="🟢"
           
           HUMAN_SIZE=$(numfmt --to=iec $TOTAL_SIZE 2>/dev/null || echo "${TOTAL_SIZE}B")
-          ENTRY="\n## ${STATUS_ICON} Session $SESSION_ID — $HUMAN_SIZE — $TIMESTAMP\n"
-          ENTRY="${ENTRY}**Source:** $SOURCE_TYPE | **Parts:** $FILE_COUNT\n"
-          ENTRY="${ENTRY}📁 [Files](../downloads/${SESSION_ID}_*/) | 📋 [Manifest]($SESSION_ID/manifest.json) | 📥 [Links]($SESSION_ID/links.txt)\n"
           
-          # Insert after the header
+          ENTRY="## ${STATUS_ICON} Session $SESSION_ID — $HUMAN_SIZE — $TIMESTAMP"
+          ENTRY="${ENTRY}\n**Source:** $SOURCE_TYPE | **Parts:** $FILE_COUNT"
+          ENTRY="${ENTRY}\n📁 [Files](../downloads/${SESSION_ID}_*/) | 📋 [Manifest]($SESSION_ID/manifest.json) | 📥 [Links]($SESSION_ID/links.txt)\n"
+          
           if grep -q "## Sessions" history/README.md; then
             sed -i "/## Sessions/a\\${ENTRY}" history/README.md
           else
+          
             echo -e "$ENTRY" >> history/README.md
           fi
 
@@ -548,23 +577,25 @@ jobs:
 
       - name: Commit history and cleanup
         run: |
-          git add history/
+          git add history/ 2>/dev/null || true
           git add .cache/aria2_session.txt 2>/dev/null || true
           git add downloads/*/download.sh 2>/dev/null || true
           git add .gitattributes .trigger.template BOOTSTRAP.md INDEX.md 2>/dev/null || true
           
           # Remove .trigger if it exists
           if [ -f .trigger ]; then
-            git rm .trigger 2>/dev/null || rm .trigger
+            git rm --cached .trigger 2>/dev/null || true
+            rm -f .trigger
           fi
-          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           if ! git diff --cached --quiet 2>/dev/null; then
             git commit -m "History update for session ${{ env.SESSION_ID }}"
             git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
-            git push origin ${{ github.ref_name }}
+            git push origin ${{ github.ref_name }} || echo "Push failed, but continuing..."
+          else
+            echo "No history changes to commit"
           fi
 
       - name: Summary
@@ -580,5 +611,5 @@ jobs:
           echo "Storage:    ${{ env.storage_mode }}"
           echo "Structure:  ${{ env.structure_mode }}"
           echo ""
-          echo "[INFO] Complete — ${{ env.FILE_COUNT }} succeeded"
+          echo "[INFO] Complete"
           echo "═══════════════════════════════════"
