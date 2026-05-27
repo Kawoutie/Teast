@@ -1,0 +1,160 @@
+name: Downloader
+permissions:
+  contents: write
+on:
+  push:
+    paths: ['.trigger']
+  workflow_dispatch:
+    inputs:
+      links:
+        description: 'Links to download (one per line)'
+        required: true
+        type: string
+      storage_mode:
+        description: 'Where to store'
+        required: false
+        type: choice
+        default: 'main'
+        options: [main, branch]
+      structure_mode:
+        description: 'Torrent file structure'
+        required: false
+        type: choice
+        default: 'flat'
+        options: [flat, archive]
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse .trigger file
+        id: trigger
+        if: github.event_name == 'push'
+        run: |
+          if [ ! -f .trigger ]; then
+            echo "ERROR: .trigger not found"
+            exit 1
+          fi
+          LINKS=""
+          while IFS='=' read -r key value; do
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+            if [ "$key" = "links" ]; then
+              LINKS="${LINKS}${value}"$'\n'
+            fi
+          done < .trigger
+          LINKS=$(echo "$LINKS" | sed '/^$/d')
+          if [ -z "$LINKS" ]; then
+            echo "No links found in .trigger"
+            exit 0
+          fi
+          echo "links<<EOF" >> $GITHUB_ENV
+          echo "$LINKS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          STORAGE_MODE=$(grep -E '^storage_mode=' .trigger | cut -d= -f2 | xargs)
+          STRUCTURE_MODE=$(grep -E '^structure_mode=' .trigger | cut -d= -f2 | xargs)
+          echo "storage_mode=${STORAGE_MODE:-main}" >> $GITHUB_ENV
+          echo "structure_mode=${STRUCTURE_MODE:-flat}" >> $GITHUB_ENV
+
+      - name: Set workflow_dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "links<<EOF" >> $GITHUB_ENV
+          echo "${{ github.event.inputs.links }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "storage_mode=${{ github.event.inputs.storage_mode || 'main' }}" >> $GITHUB_ENV
+          echo "structure_mode=${{ github.event.inputs.structure_mode || 'flat' }}" >> $GITHUB_ENV
+
+      - name: Cache tools
+        uses: actions/cache@v4
+        id: cache-tools
+        with:
+          path: /usr/local/bin/
+          key: tools-${{ hashFiles('.github/.tool_versions') }}
+
+      - name: Install tools (cache miss)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .github
+          echo "Installing aria2..."
+          wget -q https://github.com/q3aql/aria2-static-builds/releases/latest/download/aria2c-linux-amd64 -O /usr/local/bin/aria2c
+          chmod +x /usr/local/bin/aria2c
+          ARIA2_VER=$(aria2c --version 2>&1 | head -1 | awk '{print $3}')
+          echo "aria2 $ARIA2_VER"
+
+          echo "Installing 7z..."
+          wget -q https://7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz
+          tar xf /tmp/7z.tar.xz -C /usr/local/bin/ 7zz
+          mv /usr/local/bin/7zz /usr/local/bin/7z
+          chmod +x /usr/local/bin/7z
+          SEVEN_Z_VER=$(7z i 2>&1 | grep "7-Zip" | head -1 | awk '{print $3}')
+          echo "7z $SEVEN_Z_VER"
+
+          echo "Installing jq..."
+          wget -q https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 -O /usr/local/bin/jq
+          chmod +x /usr/local/bin/jq
+          JQ_VER=$(jq --version 2>&1 | cut -d- -f2)
+          echo "jq $JQ_VER"
+
+          echo "aria2 $ARIA2_VER" > .github/.tool_versions
+          echo "7z $SEVEN_Z_VER" >> .github/.tool_versions
+          echo "jq $JQ_VER" >> .github/.tool_versions
+
+      - name: Verify tools (cache hit)
+        if: steps.cache-tools.outputs.cache-hit == 'true'
+        run: |
+          if [ ! -f /usr/local/bin/aria2c ] || [ ! -f /usr/local/bin/7z ] || [ ! -f /usr/local/bin/jq ]; then
+            echo "Cached binaries missing, forcing reinstall..."
+            rm -rf /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq .github/.tool_versions
+            exit 1
+          fi
+          chmod +x /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq
+          echo "Tools verified from cache"
+          # Background check for updates
+          (wget -q -O /dev/null https://github.com/q3aql/aria2-static-builds/releases/latest && echo "aria2 update check complete") &
+          (wget -q -O /dev/null https://github.com/jqlang/jq/releases/latest && echo "jq update check complete") &
+
+      - name: First-run setup
+        run: |
+          mkdir -p downloads .cache history
+          if [ ! -f history/README.md ]; then
+            echo "# Download History" > history/README.md
+            echo "" >> history/README.md
+            echo "## Sessions" >> history/README.md
+            echo "" >> history/README.md
+          fi
+          if [ ! -f .trigger.template ]; then
+            cat > .trigger.template << 'TEMPLATE'
+          # Download trigger file
+          # Fill in your download links and options below
+          links=
+          links=
+          storage_mode=main    # main | branch
+          structure_mode=flat  # flat | archive
+          TEMPLATE
+          fi
+          if [ ! -f BOOTSTRAP.md ]; then
+            cat > BOOTSTRAP.md << 'BOOTSTRAP'
+          # Bootstrap Instructions (Git-Only Access)
+          
+          Clone this repository and create a `.trigger` file:
+          ```bash
+          git clone https://github.com/${{ github.repository }}.git
+          cd $(basename ${{ github.repository }})
+          
+          # Create trigger file
+          cat > .trigger << EOF
+          links=https://example.com/file1.zip
+          links=https://example.com/file2.pdf
+          storage_mode=main
+          structure_mode=flat
+          EOF
+          
+          git add .trigger
+          git commit -m "Trigger download"
+          git push
