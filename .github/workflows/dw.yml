@@ -391,28 +391,35 @@ jobs:
         if: env.STORAGE_MODE != 'artifact'
         run: |
           TS="${{ steps.download.outputs.timestamp }}"
+          mkdir -p "history/$TS"
           for D in downloads/${TS}_*; do
             [ -d "$D" ] || continue
             FOLDER=$(basename "$D")
-            mkdir -p "history/$TS"
-            echo "{\"timestamp\":\"$TS\",\"folder\":\"$FOLDER\",\"files\":[" > "history/$TS/manifest.json"
+            MANIFEST="history/$TS/${FOLDER}.json"
+            echo "{\"timestamp\":\"$TS\",\"folder\":\"$FOLDER\",\"files\":[" > "$MANIFEST"
             FIRST=true
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
               REL="${f#$D/}"
               SZ=$(stat -c%s "$f")
               HS=$(sha256sum "$f" | cut -d' ' -f1)
-              [ "$FIRST" = false ] && echo "," >> "history/$TS/manifest.json"
+              [ "$FIRST" = false ] && echo "," >> "$MANIFEST"
               FIRST=false
-              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "history/$TS/manifest.json"
+              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
             done
-            echo "]}" >> "history/$TS/manifest.json"
+            echo "]}" >> "$MANIFEST"
+
+            # SHA256SUMS
             (cd "$D" && sha256sum * > SHA256SUMS)
+
+            # links.txt
             BRANCH="${GITHUB_REF_NAME:-main}"
             REPO="${{ github.repository }}"
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
               REL="${f#$D/}"
               echo "https://raw.githubusercontent.com/$REPO/$BRANCH/downloads/$FOLDER/$REL"
-            done > "history/$TS/links.txt"
+            done > "history/$TS/${FOLDER}_links.txt"
+
+            # download.sh
             cat > "$D/download.sh" << EOF
           #!/bin/bash
           REPO="https://github.com/$REPO.git"
@@ -427,12 +434,12 @@ jobs:
           EOF
             chmod +x "$D/download.sh"
           done
-
+          
       - name: Update history and indexes
         if: env.STORAGE_MODE != 'artifact'
         run: |
           cat > /tmp/update_history.py << 'PYEOF'
-          import json, os, re, time
+          import json, os, re, glob
           from collections import defaultdict
 
           ts = os.environ['TS']
@@ -444,6 +451,7 @@ jobs:
           structure = os.environ.get('STRUCTURE_MODE','flat')
           storage = os.environ.get('STORAGE_MODE','main')
 
+          # Read failures
           failures = set()
           if os.path.exists('/tmp/errors.log'):
               with open('/tmp/errors.log') as ef:
@@ -451,6 +459,7 @@ jobs:
                       if line.startswith('FAIL:'):
                           failures.add(line.strip().split(':',1)[1].strip())
 
+          # Determine status per download folder
           folder_status = {}
           if os.path.exists('/tmp/folder_urls.txt'):
               with open('/tmp/folder_urls.txt') as f:
@@ -464,96 +473,107 @@ jobs:
                           elif part.startswith('URL='):
                               url = part.split('=',1)[1]
                       if folder and url:
-                          if url in failures:
-                              folder_status[folder] = 'failed'
-                          else:
-                              folder_status[folder] = 'success'
+                          folder_status[folder] = 'failed' if url in failures else 'success'
 
-          total_size = 0
-          total_count = 0
+          def file_emoji(fname):
+              ext = fname.lower().split('.')[-1] if '.' in fname else ''
+              emoji_map = {
+                  'mp4': '🎬', 'mkv': '🎬', 'webm': '🎬',
+                  'mp3': '🎵', 'flac': '🎵', 'wav': '🎵',
+                  'zip': '🗜️', '7z': '🗜️', 'rar': '🗜️',
+                  'jpg': '🖼️', 'png': '🖼️', 'gif': '🖼️',
+                  'pdf': '📕', 'epub': '📗', 'html': '🌐',
+                  'srt': '💬', 'vtt': '💬'
+              }
+              return emoji_map.get(ext, '📄')
+
+          # Process only the current session's manifests
           new_entries = []
+          total_session_size = 0
+          total_session_count = 0
+          manifest_pattern = f"history/{ts}/*.json"
+          for manifest_path in sorted(glob.glob(manifest_pattern)):
+              with open(manifest_path) as f:
+                  data = json.load(f)
+              folder = data['folder']
+              dd = f"downloads/{folder}"
+              session_ts = data['timestamp']  # same as ts
 
+              normal = []
+              splits = defaultdict(list)
+              for fi in data['files']:
+                  p = fi['path']
+                  mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
+                  if mt:
+                      splits[mt.group(1)].append(fi)
+                  else:
+                      normal.append(fi)
+
+              status = folder_status.get(folder, 'success')
+              icon = '🔴' if status == 'failed' else '🟢' if status == 'success' else '🟡'
+
+              rows = []
+              # Normal files
+              for fi in normal:
+                  raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{fi['path']}"
+                  size = fi.get('size',0)
+                  rows.append((file_emoji(fi['path']), fi['path'], size, raw, False, 0))
+              # Split groups
+              for base, parts in sorted(splits.items()):
+                  parts.sort(key=lambda x: x['path'])
+                  total_part_size = sum(p['size'] for p in parts)
+                  raw_first = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{parts[0]['path']}"
+                  rows.append(('📦', f"{base}.7z ({len(parts)} parts)", total_part_size, raw_first, True, len(parts)))
+                  for i, p in enumerate(parts):
+                      raw_p = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{p['path']}"
+                      prefix = '&nbsp;&nbsp;&nbsp;&nbsp;├─' if i < len(parts)-1 else '&nbsp;&nbsp;&nbsp;&nbsp;└─'
+                      rows.append(('', f"{prefix} {p['path']}", p['size'], raw_p, False, 0))
+
+              entry_lines = []
+              entry_lines.append(f"## {icon} {folder} — {sum(fi['size'] for fi in data['files'])} bytes — {session_ts}")
+              entry_lines.append(f"**Mode:** {mode} | **Quality:** {quality} | **Subtitles:** {subtitle} | **Torrent:** {structure}")
+              entry_lines.append("")
+              entry_lines.append("| File | Size | Download |")
+              entry_lines.append("|------|------|----------|")
+              for emoji, name, size, url, is_group, part_count in rows:
+                  size_str = f"{size/1048576:.0f} MB" if size >= 1048576 else f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
+                  if emoji and not name.startswith('&nbsp'):
+                      display_name = f"{emoji} {name}"
+                  else:
+                      display_name = name
+                  download_link = f"[⬇]({url})" if url else ""
+                  entry_lines.append(f"| {display_name} | {size_str} | {download_link} |")
+              entry_lines.append("")
+              entry_lines.append(f"📥 [All links (links.txt)](https://raw.githubusercontent.com/{repo}/{branch}/history/{ts}/{folder}_links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/{repo}/{branch}/{dd}/download.sh)")
+              entry_lines.append("")
+              entry_lines.append("---")
+              new_entries.append("\n".join(entry_lines))
+
+              total_session_size += sum(fi['size'] for fi in data['files'])
+              total_session_count += 1
+
+          # Update HISTORY.md – insert new entries after the header
+          readme_path = "history/README.md"
+          # Calculate total stats from all manifests (old + new)
+          total_size = total_session_size
+          total_count = total_session_count
+          # Walk all history to sum sizes from existing manifests
           for root, dirs, files in os.walk("history"):
               for mf in files:
-                  if mf == "manifest.json":
-                      with open(os.path.join(root, mf)) as f:
-                          data = json.load(f)
-                      folder = data['folder']
-                      dd = f"downloads/{folder}"
-                      session_ts = data['timestamp']
-                      normal = []
-                      splits = defaultdict(list)
-                      for fi in data['files']:
-                          p = fi['path']
-                          mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
-                          if mt:
-                              splits[mt.group(1)].append(fi)
-                          else:
-                              normal.append(fi)
-
-                      status = folder_status.get(folder, 'success')
-                      if status == 'failed':
-                          icon = '🔴'
-                      elif status == 'success':
-                          icon = '🟢'
-                      else:
-                          icon = '🟡'
-
-                      def file_emoji(fname):
-                          ext = fname.lower().split('.')[-1] if '.' in fname else ''
-                          emoji_map = {
-                              'mp4': '🎬', 'mkv': '🎬', 'webm': '🎬',
-                              'mp3': '🎵', 'flac': '🎵', 'wav': '🎵',
-                              'zip': '🗜️', '7z': '🗜️', 'rar': '🗜️',
-                              'jpg': '🖼️', 'png': '🖼️', 'gif': '🖼️',
-                              'pdf': '📕', 'epub': '📗', 'html': '🌐',
-                              'srt': '💬', 'vtt': '💬'
-                          }
-                          return emoji_map.get(ext, '📄')
-
-                      rows = []
-                      for fi in normal:
-                          raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{fi['path']}"
-                          size = fi.get('size',0)
-                          rows.append((file_emoji(fi['path']), fi['path'], size, raw, False, 0))
-                      for base, parts in sorted(splits.items()):
-                          parts.sort(key=lambda x: x['path'])
-                          total_part_size = sum(p['size'] for p in parts)
-                          raw_first = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{parts[0]['path']}"
-                          rows.append(('📦', f"{base}.7z ({len(parts)} parts)", total_part_size, raw_first, True, len(parts)))
-                          for i, p in enumerate(parts):
-                              raw_p = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{p['path']}"
-                              prefix = '&nbsp;&nbsp;&nbsp;&nbsp;├─' if i < len(parts)-1 else '&nbsp;&nbsp;&nbsp;&nbsp;└─'
-                              rows.append(('', f"{prefix} {p['path']}", p['size'], raw_p, False, 0))
-
-                      entry_lines = []
-                      entry_lines.append(f"## {icon} {folder} — {data.get('total_size','')} — {session_ts}")
-                      entry_lines.append(f"**Mode:** {mode} | **Quality:** {quality} | **Subtitles:** {subtitle} | **Torrent:** {structure}")
-                      entry_lines.append("")
-                      entry_lines.append("| File | Size | Download |")
-                      entry_lines.append("|------|------|----------|")
-                      for emoji, name, size, url, is_group, part_count in rows:
-                          size_str = f"{size/1048576:.0f} MB" if size >= 1048576 else f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
-                          if emoji and not name.startswith('&nbsp'):
-                              display_name = f"{emoji} {name}"
-                          else:
-                              display_name = name
-                          download_link = f"[⬇]({url})" if url else ""
-                          entry_lines.append(f"| {display_name} | {size_str} | {download_link} |")
-                      entry_lines.append("")
-                      entry_lines.append(f"📥 [All links (links.txt)](https://raw.githubusercontent.com/{repo}/{branch}/history/{session_ts}/links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/{repo}/{branch}/{dd}/download.sh)")
-                      entry_lines.append("")
-                      entry_lines.append("---")
-                      new_entries.append("\n".join(entry_lines))
-
-                      for fi in data['files']:
-                          total_size += fi.get('size',0)
-                      total_count += 1
+                  if mf.endswith('.json') and os.path.dirname(os.path.join(root, mf)) != f"history/{ts}":
+                      # old manifest
+                      try:
+                          with open(os.path.join(root, mf)) as f:
+                              old_data = json.load(f)
+                          total_size += sum(fi['size'] for fi in old_data['files'])
+                          total_count += 1
+                      except: pass
 
           header = f"# 📥 Download History\n**Total Size:** {total_size/1073741824:.1f} GB | **Downloads:** {total_count}\n\n---\n\n"
-          if os.path.exists('history/README.md'):
-              with open('history/README.md') as f:
+          if os.path.exists(readme_path):
+              with open(readme_path) as f:
                   existing = f.read()
+              # Insert new entries right after the first --- line
               if "---" in existing:
                   parts = existing.split("---\n", 1)
                   new_content = parts[0] + "---\n\n" + "\n".join(new_entries) + "\n" + parts[1]
@@ -561,13 +581,14 @@ jobs:
                   new_content = header + "\n".join(new_entries)
           else:
               new_content = header + "\n".join(new_entries)
-          with open('history/README.md', 'w') as f:
+          with open(readme_path, 'w') as f:
               f.write(new_content)
 
+          # Update INDEX.md
           index_lines = ["# Content Index", "", "| Folder | Files | Git Command |", "|--------|-------|-------------|"]
           for root, dirs, files in os.walk("history"):
               for mf in files:
-                  if mf == "manifest.json":
+                  if mf.endswith('.json'):
                       with open(os.path.join(root, mf)) as f:
                           data = json.load(f)
                       folder = data['folder']
@@ -578,11 +599,13 @@ jobs:
           with open('INDEX.md', 'w') as f:
               f.write("\n".join(index_lines) + "\n")
 
+          # Generate badge.svg
           size_gb = total_size / 1073741824
           badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">📦 {size_gb:.1f} GB | 📂 {total_count} downloads</text></svg>'
           with open('history/badge.svg', 'w') as f:
               f.write(badge_svg)
 
+          # Bootstrap and trigger template if missing
           if not os.path.exists('BOOTSTRAP.md'):
               with open('BOOTSTRAP.md', 'w') as f:
                   f.write(f"""# Git-Only Access
@@ -622,7 +645,7 @@ jobs:
           subtitle_mode=manual
           structure_mode=flat
           """)
-          print("History and indexes updated.")
+          print("History updated.")
           PYEOF
 
           export TS="${{ steps.download.outputs.timestamp }}"
