@@ -1,615 +1,714 @@
-name: Downloader
-permissions:
-  contents: write
+name: DownLord
+
 on:
-  push:
-    paths: ['.trigger']
   workflow_dispatch:
     inputs:
       links:
-        description: 'Links to download (one per line)'
+        description: 'Links (one per line)'
         required: true
         type: string
+        default: ''
       storage_mode:
-        description: 'Where to store'
-        required: false
+        description: 'Storage mode'
+        required: true
         type: choice
+        options:
+          - main
+          - branch
+          - artifact
         default: 'main'
-        options: [main, branch]
-      structure_mode:
-        description: 'Torrent file structure'
+      download_mode:
+        description: 'Download mode'
+        required: true
+        type: choice
+        options:
+          - download
+          - torrent_info
+          - webpage_archive
+        default: 'download'
+      video_quality:
+        description: 'YouTube video quality'
         required: false
         type: choice
+        options:
+          - best
+          - 1080p
+          - 720p
+          - 480p
+          - 360p
+          - audio_only
+        default: 'best'
+      subtitle_mode:
+        description: 'YouTube subtitles'
+        required: false
+        type: choice
+        options:
+          - none
+          - manual
+          - auto
+        default: 'manual'
+      structure_mode:
+        description: 'Torrent structure'
+        required: false
+        type: choice
+        options:
+          - flat
+          - preserve
+          - archive
         default: 'flat'
-        options: [flat, archive]
+  push:
+    paths: ['.trigger']
+
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Parse .trigger file
-        id: trigger
+      # ---------- TRIGGER FILE HANDLING ----------
+      - name: Handle trigger file
         if: github.event_name == 'push'
         run: |
-          if [ ! -f .trigger ]; then
-            echo "ERROR: .trigger not found"
-            exit 1
-          fi
-          LINKS=""
-          while IFS='=' read -r key value; do
-            key=$(echo "$key" | xargs)
-            value=$(echo "$value" | xargs)
-            if [ "$key" = "links" ]; then
-              LINKS="${LINKS}${value}"$'\n'
-            fi
-          done < .trigger
-          LINKS=$(echo "$LINKS" | sed '/^$/d')
-          if [ -z "$LINKS" ]; then
-            echo "No links found in .trigger"
-            exit 0
-          fi
-          echo "links<<EOF" >> $GITHUB_ENV
-          echo "$LINKS" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          STORAGE_MODE=$(grep -E '^storage_mode=' .trigger | cut -d= -f2 | xargs)
-          STRUCTURE_MODE=$(grep -E '^structure_mode=' .trigger | cut -d= -f2 | xargs)
-          echo "storage_mode=${STORAGE_MODE:-main}" >> $GITHUB_ENV
-          echo "structure_mode=${STRUCTURE_MODE:-flat}" >> $GITHUB_ENV
-
-      - name: Set workflow_dispatch inputs
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "links<<EOF" >> $GITHUB_ENV
-          echo "${{ github.event.inputs.links }}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "storage_mode=${{ github.event.inputs.storage_mode || 'main' }}" >> $GITHUB_ENV
-          echo "structure_mode=${{ github.event.inputs.structure_mode || 'flat' }}" >> $GITHUB_ENV
-
-      - name: Cache tools
-        uses: actions/cache@v4
-        id: cache-tools
-        with:
-          path: /usr/local/bin/
-          key: tools-${{ hashFiles('.github/.tool_versions') }}
-
-      - name: Install tools
-        if: steps.cache-tools.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p .github
-          
-          echo "Installing aria2..."
-          ARIA2_URL=$(wget -qO- https://api.github.com/repos/q3aql/aria2-static-builds/releases/latest 2>/dev/null | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url' 2>/dev/null)
-          if [ -z "$ARIA2_URL" ]; then
-            # Fallback to known version
-            ARIA2_URL="https://github.com/q3aql/aria2-static-builds/releases/download/v1.37.0/aria2c-linux-amd64"
-          fi
-          wget -q "$ARIA2_URL" -O /usr/local/bin/aria2c || {
-            echo "Failed to download aria2, trying apt..."
-            sudo apt-get update -qq && sudo apt-get install -y -qq aria2 && cp $(which aria2c) /usr/local/bin/aria2c
-          }
-          chmod +x /usr/local/bin/aria2c
-          ARIA2_VER=$(aria2c --version 2>&1 | head -1 | awk '{print $3}')
-          echo "aria2 $ARIA2_VER"
-
-          echo "Installing 7z..."
-          wget -q https://7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz || {
-            echo "Failed to download 7z, trying apt..."
-            sudo apt-get install -y -qq p7zip-full && cp $(which 7z) /usr/local/bin/7z
-          }
-          if [ -f /tmp/7z.tar.xz ]; then
-            tar xf /tmp/7z.tar.xz -C /usr/local/bin/ 7zz
-            mv /usr/local/bin/7zz /usr/local/bin/7z
-          fi
-          chmod +x /usr/local/bin/7z
-          SEVEN_Z_VER=$(7z i 2>&1 | grep "7-Zip" | head -1 | awk '{print $3}')
-          echo "7z $SEVEN_Z_VER"
-
-          echo "Installing jq..."
-          JQ_URL=$(wget -qO- https://api.github.com/repos/jqlang/jq/releases/latest 2>/dev/null | jq -r '.assets[] | select(.name | contains("linux-amd64")) | .browser_download_url' 2>/dev/null)
-          if [ -z "$JQ_URL" ]; then
-            JQ_URL="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
-          fi
-          wget -q "$JQ_URL" -O /usr/local/bin/jq || {
-            echo "Failed to download jq, trying apt..."
-            sudo apt-get install -y -qq jq && cp $(which jq) /usr/local/bin/jq
-          }
-          chmod +x /usr/local/bin/jq
-          JQ_VER=$(jq --version 2>&1 | cut -d- -f2)
-          echo "jq $JQ_VER"
-
-          echo "aria2 $ARIA2_VER" > .github/.tool_versions
-          echo "7z $SEVEN_Z_VER" >> .github/.tool_versions
-          echo "jq $JQ_VER" >> .github/.tool_versions
-
-      - name: Verify tools (cache hit)
-        if: steps.cache-tools.outputs.cache-hit == 'true'
-        run: |
-          MISSING=false
-          if [ ! -f /usr/local/bin/aria2c ]; then
-            echo "aria2c missing from cache"
-            MISSING=true
-          fi
-          if [ ! -f /usr/local/bin/7z ]; then
-            echo "7z missing from cache"
-            MISSING=true
-          fi
-          if [ ! -f /usr/local/bin/jq ]; then
-            echo "jq missing from cache"
-            MISSING=true
-          fi
-          if [ "$MISSING" = "true" ]; then
-            echo "Cached binaries incomplete, forcing reinstall..."
-            rm -rf /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq .github/.tool_versions
-            exit 1
-          fi
-          chmod +x /usr/local/bin/aria2c /usr/local/bin/7z /usr/local/bin/jq
-          echo "All tools verified from cache"
-
-      - name: First-run setup
-        run: |
-          mkdir -p downloads .cache history
-          if [ ! -f history/README.md ]; then
-            echo "# Download History" > history/README.md
-            echo "" >> history/README.md
-            echo "## Sessions" >> history/README.md
-            echo "" >> history/README.md
-          fi
-          if [ ! -f .trigger.template ]; then
-            cat > .trigger.template << 'TEMPLATE'
-          # Download trigger file
-          # Fill in your download links and options below
-          links=
-          links=
-          storage_mode=main    # main | branch
-          structure_mode=flat  # flat | archive
-          TEMPLATE
-          fi
-          if [ ! -f BOOTSTRAP.md ]; then
-            cat > BOOTSTRAP.md << BOOTSTRAPEOF
-          # Bootstrap Instructions (Git-Only Access)
-          
-          Clone this repository and create a `.trigger` file:
-          ```bash
-          git clone https://github.com/${{ github.repository }}.git
-          cd $(basename ${{ github.repository }})
-          
-          # Create trigger file
-          cat > .trigger << EOF
-          links=https://example.com/file1.zip
-          links=https://example.com/file2.pdf
-          storage_mode=main
-          structure_mode=flat
-          EOF
-          
-          git add .trigger
-          git commit -m "Trigger download"
-          git push
-          ```
-          BOOTSTRAPEOF
-          fi
-          if [ ! -f INDEX.md ]; then
-            cat > INDEX.md << 'INDEX'
-          # Content Index
-          
-          ## Downloads
-          See [history/README.md](history/README.md) for all downloads.
-          
-          ## Structure
-          - `downloads/` - Downloaded files organized by session
-          - `history/` - Download manifests, links, and stats
-          - `.cache/` - Aria2 session data for resuming
-          - `.trigger.template` - Template for trigger-based downloads
-          INDEX
-          fi
-          if [ ! -f .gitattributes ]; then
-            echo "*.7z.* binary delta=off" > .gitattributes
-          fi
-
-      - name: Parse input and classify URLs
-        run: |
-          SESSION_ID=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M)
-          TIMESTAMP=$(TZ='Asia/Tehran' date '+%Y-%m-%d %H:%M')
-          echo "SESSION_ID=$SESSION_ID" >> $GITHUB_ENV
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          
-          echo "[INFO] Parsing links..."
-          LINKS="${{ env.links }}"
-          echo "$LINKS" | while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            echo "  -> $line"
-          done
-          
-          LINK_COUNT=$(echo "$LINKS" | grep -c . || echo 0)
-          echo "[INFO] Parsed $LINK_COUNT links"
-          echo "[INFO] Session: $SESSION_ID"
-          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
-          
-          if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "[INFO] No links to download, exiting"
-            exit 0
-          fi
-
-      - name: Setup process-file.sh
-        run: |
-          mkdir -p .cache
-          cat > .cache/process-file.sh << 'PROCSCRIPT'
-          #!/bin/bash
-          # $1 = GID, $2 = number of files, $3 = file path
-          SESSION_ID="$4"
-          
-          NAME=$(basename "$3" | sed 's/[^a-zA-Z0-9._-]/_/g')
-          FOLDER="${SESSION_ID}_${NAME%.*}"
-          
-          echo "[PROCESS] $NAME — processing"
-          
-          mkdir -p downloads/$FOLDER
-          mv "$3" downloads/$FOLDER/
-          
-          SIZE=$(stat -c%s "downloads/$FOLDER/$NAME" 2>/dev/null || echo 0)
-          
-          if [ $SIZE -gt 104857600 ]; then
-            echo "[PROCESS] $NAME — $SIZE, splitting into 99MB parts"
-            cd downloads/$FOLDER
-            7z a -mx=0 -mmt=on -v99m "${NAME%.*}.7z" "$NAME"
-            rm "$NAME"
-            cd ../..
-            echo "[PROCESS] $NAME — split complete"
+          if [ -f ".trigger" ]; then
+            TRIGGER_LINKS=$(cat .trigger | tr '\n' ' ')
+            echo "TRIGGER_LINKS=$TRIGGER_LINKS" >> $GITHUB_ENV
+            echo "IS_TRIGGER=true" >> $GITHUB_ENV
+            rm -f .trigger
+            git config --local user.email "action@github.com"
+            git config --local user.name "DownLord"
+            git add .trigger && git commit -m "Remove trigger" && git push || true
           else
-            echo "[PROCESS] $NAME — $SIZE, no split needed"
+            echo "No trigger file"; exit 0
           fi
-          
-          sha256sum downloads/$FOLDER/* > downloads/$FOLDER/SHA256SUMS 2>/dev/null
-          git add downloads/$FOLDER/ 2>/dev/null
-          
-          echo $SIZE >> /tmp/batch_bytes
-          echo "Processed: $SIZE" >> /tmp/processed_sizes
-          echo "$FOLDER" >> /tmp/processed_folders
-          PROCSCRIPT
-          chmod +x .cache/process-file.sh
 
-      - name: Prepare aria2 input
+      # ---------- SET INPUTS ----------
+      - name: Set inputs
+        id: inputs
         run: |
-          echo "Classifying URLs..."
-          > /tmp/aria2_direct.txt
-          > /tmp/aria2_torrent_files.txt
-          > /tmp/url_types.txt
-          
-          echo "${{ env.links }}" | while IFS= read -r url; do
-            [ -z "$url" ] && continue
-            url=$(echo "$url" | xargs)
-            
-            if echo "$url" | grep -qi "^magnet:"; then
-              echo "$url" >> /tmp/aria2_torrent_files.txt
-              echo "magnet" >> /tmp/url_types.txt
-            elif echo "$url" | grep -qi "\.torrent$"; then
-              echo "$url" >> /tmp/aria2_torrent_files.txt
-              echo "torrent_file" >> /tmp/url_types.txt
-            else
-              echo "$url" >> /tmp/aria2_direct.txt
-              echo "direct" >> /tmp/url_types.txt
-            fi
-          done
-          
-          # Download torrent files and combine
-          > /tmp/aria2_input.txt
-          
-          if [ -s /tmp/aria2_direct.txt ]; then
-            cat /tmp/aria2_direct.txt >> /tmp/aria2_input.txt
+          if [ "$IS_TRIGGER" = "true" ]; then
+            echo "LINKS=$TRIGGER_LINKS" >> $GITHUB_ENV
+            echo "STORAGE_MODE=main" >> $GITHUB_ENV
+            echo "DOWNLOAD_MODE=download" >> $GITHUB_ENV
+            echo "QUALITY=best" >> $GITHUB_ENV
+            echo "SUBTITLE_MODE=manual" >> $GITHUB_ENV
+            echo "STRUCTURE_MODE=flat" >> $GITHUB_ENV
+          else
+            echo "LINKS=${{ github.event.inputs.links }}" >> $GITHUB_ENV
+            echo "STORAGE_MODE=${{ github.event.inputs.storage_mode }}" >> $GITHUB_ENV
+            echo "DOWNLOAD_MODE=${{ github.event.inputs.download_mode }}" >> $GITHUB_ENV
+            echo "QUALITY=${{ github.event.inputs.video_quality }}" >> $GITHUB_ENV
+            echo "SUBTITLE_MODE=${{ github.event.inputs.subtitle_mode }}" >> $GITHUB_ENV
+            echo "STRUCTURE_MODE=${{ github.event.inputs.structure_mode }}" >> $GITHUB_ENV
           fi
-          
-          if [ -s /tmp/aria2_torrent_files.txt ]; then
-            while IFS= read -r torurl; do
-              [ -z "$torurl" ] && continue
-              if echo "$torurl" | grep -qi "^magnet:"; then
-                echo "$torurl" >> /tmp/aria2_input.txt
-              else
-                echo "[INFO] Downloading torrent file: $torurl"
-                torfile="/tmp/torrent_$(date +%s%N).torrent"
-                curl -sL "$torurl" -o "$torfile" && echo "$torfile" >> /tmp/aria2_input.txt
+
+      # ---------- CORE TOOLS (7-day apt cache) ----------
+      - name: Install core tools
+        run: |
+          if command -v aria2c && command -v 7z && command -v jq; then
+            if [ -f .github/.last_apt_update ]; then
+              DAYS=$(( ($(date +%s) - $(cat .github/.last_apt_update)) / 86400 ))
+              if [ $DAYS -le 7 ]; then
+                echo "Core tools up-to-date ($DAYS days)."
+                exit 0
               fi
-            done < /tmp/aria2_torrent_files.txt
+            fi
           fi
-          
-          INPUT_COUNT=$(wc -l < /tmp/aria2_input.txt 2>/dev/null || echo 0)
-          echo "INPUT_COUNT=$INPUT_COUNT" >> $GITHUB_ENV
+          sudo apt-get update -qq
+          sudo apt-get install -y aria2 p7zip-full p7zip-rar curl jq python3 python3-requests
+          date +%s > .github/.last_apt_update
 
-      - name: Run aria2 downloads
+      # ---------- MEDIA TOOLS CACHE ----------
+      - uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/yt-dlp
+          key: ytdlp-static-${{ hashFiles('.github/.last_media_update') }}
+      - uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/ffmpeg
+          key: ffmpeg-static-${{ hashFiles('.github/.last_media_update') }}
+      - uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/ffprobe
+          key: ffprobe-static-${{ hashFiles('.github/.last_media_update') }}
+
+      - name: Install media tools if needed
         run: |
-          if [ ! -f /tmp/aria2_input.txt ] || [ ! -s /tmp/aria2_input.txt ]; then
-            echo "[INFO] No valid links to download"
-            echo "ARIA2_EXIT=0" >> $GITHUB_ENV
-            exit 0
-          fi
-          
-          echo 0 > /tmp/batch_bytes
-          echo "" > /tmp/processed_sizes
-          echo "" > /tmp/processed_folders
-          
-          mkdir -p "$RUNNER_TEMP/downloads/$SESSION_ID"
-          
-          echo "[INFO] Starting downloads..."
-          echo "[DOWNLOAD] $(wc -l < /tmp/aria2_input.txt) files queued"
-          
-          if [ -f .cache/aria2_session.txt ] && [ -s .cache/aria2_session.txt ]; then
-            cp .cache/aria2_session.txt /tmp/aria2_session.txt
-            echo "[INFO] Resuming from previous session"
-          fi
-          
-          set +e
-          aria2c \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --min-split-size=1M \
-            --bt-max-peers=0 \
-            --seed-time=0 \
-            --seed-ratio=0 \
-            --continue=true \
-            --file-allocation=none \
-            --disk-cache=64M \
-            --save-session=/tmp/aria2_session.txt \
-            --input-file=/tmp/aria2_input.txt \
-            --dir="$RUNNER_TEMP/downloads/$SESSION_ID" \
-            --on-download-error=continue \
-            --on-download-complete=".cache/process-file.sh" \
-            --on-download-complete-param="$SESSION_ID" \
-            --console-log-level=notice \
-            2>&1 | tee /tmp/aria2_log.txt
-          ARIA2_EXIT=$?
-          set -e
-          
-          echo "ARIA2_EXIT=$ARIA2_EXIT" >> $GITHUB_ENV
-          
-          # Save session for resume
-          if [ -f /tmp/aria2_session.txt ]; then
-            cp /tmp/aria2_session.txt .cache/aria2_session.txt
-          fi
-          
-          # Process any remaining files in temp directory
-          find "$RUNNER_TEMP/downloads/$SESSION_ID" -type f 2>/dev/null | while read f; do
-            if [ -f "$f" ]; then
-              echo "Processing leftover: $f"
-              bash .cache/process-file.sh "0" "1" "$f" "$SESSION_ID" || true
+          URLS="$LINKS"
+          MODE="$DOWNLOAD_MODE"
+          [[ "$MODE" == "torrent_info" || "$MODE" == "webpage_archive" ]] && exit 0
+          NEED_MEDIA=false
+          for URL in $URLS; do
+            if echo "$URL" | grep -qE "(youtube|youtu\.be|vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
+              NEED_MEDIA=true
+              break
             fi
           done
-          
-          if [ $ARIA2_EXIT -ne 0 ]; then
-            echo "[WARNING] aria2 exited with code $ARIA2_EXIT"
-            echo "[INFO] Committing what was downloaded so far"
+          [ "$NEED_MEDIA" = false ] && exit 0
+          if command -v yt-dlp && command -v ffprobe; then
+            if [ -f .github/.last_media_update ]; then
+              DAYS=$(( ($(date +%s) - $(cat .github/.last_media_update)) / 86400 ))
+              [ $DAYS -le 7 ] && { echo "Media tools up-to-date."; exit 0; }
+            fi
           fi
+          if ! command -v yt-dlp; then
+            curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+            chmod +x /usr/local/bin/yt-dlp
+          fi
+          if ! command -v ffmpeg; then
+            curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar xJ -C /tmp/
+            cp /tmp/ffmpeg-*-static/ffmpeg /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
+            rm -rf /tmp/ffmpeg-*
+          fi
+          date +%s > .github/.last_media_update
 
-      - name: Apply structure mode for torrents
-        if: env.structure_mode == 'archive'
+      - name: Install monolith (webpage archive)
+        if: env.DOWNLOAD_MODE == 'webpage_archive'
         run: |
-          echo "[INFO] Applying archive structure mode for torrents"
-          for folder in downloads/${SESSION_ID}_*; do
-            [ ! -d "$folder" ] && continue
-            foldername=$(basename "$folder")
-            echo "[ARCHIVE] Archiving $folder"
-            cd downloads
-            7z a -mx=0 -mmt=on -v99m "${foldername}.7z" "$foldername" && rm -rf "$foldername"
-            git add "${foldername}.7z"* 2>/dev/null
-            cd ..
-          done
-
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          STORAGE_MODE="${{ env.storage_mode }}"
-          SESSION_ID="${{ env.SESSION_ID }}"
-          ORIGINAL_BRANCH="${{ github.ref_name }}"
-          
-          if [ "$STORAGE_MODE" = "branch" ]; then
-            git checkout --orphan "sessions/$SESSION_ID"
-            git rm -rf --cached . 2>/dev/null || true
-          fi
-          
-          STAGED=$(git diff --cached --name-only 2>/dev/null | wc -l)
-          
-          if [ "$STAGED" -gt 0 ]; then
-            echo "[COMMIT] Final — committing $STAGED files"
-            git commit -m "Session $SESSION_ID — Complete"
-            git push origin "$(git rev-parse --abbrev-ref HEAD)" --force 2>/dev/null || git push origin "$(git rev-parse --abbrev-ref HEAD)"
-          else
-            echo "[INFO] No files to commit"
-          fi
-          
-          if [ "$STORAGE_MODE" = "branch" ]; then
-            git checkout "$ORIGINAL_BRANCH" 2>/dev/null || git checkout main
-          fi
-
-      - name: Generate history files
-        run: |
-          SESSION_ID="${{ env.SESSION_ID }}"
-          TIMESTAMP="${{ env.TIMESTAMP }}"
-          STORAGE_MODE="${{ env.storage_mode }}"
-          BRANCH="${{ github.ref_name }}"
-          
-          if [ "$STORAGE_MODE" = "branch" ]; then
-            BRANCH="sessions/$SESSION_ID"
-          fi
-          
-          mkdir -p history/$SESSION_ID
-          
-          # Determine source type
-          SOURCE_TYPE="direct"
-          if grep -qi "magnet:\|\.torrent" <<< "${{ env.links }}"; then
-            SOURCE_TYPE="torrent"
-          fi
-          
-          # Calculate totals
-          DOWNLOAD_FOLDERS=$(ls -d downloads/${SESSION_ID}_* 2>/dev/null || true)
-          TOTAL_SIZE=0
-          FILE_COUNT=0
-          
-          # Build manifest files array
-          MANIFEST_ENTRIES=""
-          FIRST=true
-          
-          for folder in $DOWNLOAD_FOLDERS; do
-            [ ! -d "$folder" ] && continue
-            FOLDER_NAME=$(basename "$folder")
-            
-            find "$folder" -type f ! -name "SHA256SUMS" ! -name "download.sh" | while read file; do
-              FILENAME=$(basename "$file")
-              SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
-              HASH=$(grep "$FILENAME" "$folder/SHA256SUMS" 2>/dev/null | awk '{print $1}' || echo "unknown")
-              
-              echo "{\"name\": \"$FILENAME\", \"sha256\": \"$HASH\", \"size_bytes\": $SIZE}" >> /tmp/manifest_entries.json
-              echo $SIZE >> /tmp/total_sizes
-            done
-          done
-          
-          if [ -f /tmp/total_sizes ]; then
-            TOTAL_SIZE=$(paste -sd+ /tmp/total_sizes | bc 2>/dev/null || echo 0)
-          fi
-          if [ -f /tmp/manifest_entries.json ]; then
-            FILE_COUNT=$(wc -l < /tmp/manifest_entries.json)
-            MANIFEST_FILES="[$(paste -sd, /tmp/manifest_entries.json)]"
-          else
-            MANIFEST_FILES="[]"
-          fi
-          
-          ARIA2_EXIT="${{ env.ARIA2_EXIT }}"
-          STATUS="success"
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            STATUS="failed"
-          elif [ "$ARIA2_EXIT" != "0" ]; then
-            STATUS="partial"
-          fi
-          
-          # Create manifest.json
-          cat > history/$SESSION_ID/manifest.json << MANIFEST
-          {
-            "id": "$SESSION_ID",
-            "timestamp": "$TIMESTAMP",
-            "folder": "downloads/${SESSION_ID}_*",
-            "source": "$SOURCE_TYPE",
-            "size_bytes": $TOTAL_SIZE,
-            "status": "$STATUS",
-            "files": $MANIFEST_FILES
+          command -v monolith || {
+            curl -sL https://github.com/Y2Z/monolith/releases/latest/download/monolith-gnu-linux-x86_64 -o /usr/local/bin/monolith
+            chmod +x /usr/local/bin/monolith
           }
-          MANIFEST
-          
-          # Create links.txt
-          REPO="${{ github.repository }}"
-          echo "# Download Links for Session $SESSION_ID" > history/$SESSION_ID/links.txt
-          echo "# Timestamp: $TIMESTAMP" >> history/$SESSION_ID/links.txt
-          echo "" >> history/$SESSION_ID/links.txt
-          
-          for folder in $DOWNLOAD_FOLDERS; do
-            [ ! -d "$folder" ] && continue
-            find "$folder" -type f ! -name "SHA256SUMS" ! -name "download.sh" | while read file; do
-              echo "https://raw.githubusercontent.com/$REPO/$BRANCH/$file" >> history/$SESSION_ID/links.txt
+
+      - name: Background yt-dlp update
+        run: |
+          ( command -v yt-dlp && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp.new && chmod +x /usr/local/bin/yt-dlp.new ) &
+
+      # ---------- TORRENT INFO MODE ----------
+      - name: Torrent info mode
+        if: env.DOWNLOAD_MODE == 'torrent_info'
+        run: |
+          URL=$(echo "$LINKS" | head -n1)  # Use first link
+          TS=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
+          mkdir -p history/$TS
+
+          if [[ "$URL" == magnet:* ]]; then
+            sudo apt-get install -y transmission-cli
+            transmission-show "$URL" > /tmp/torrent_info.txt 2>&1 || echo "No metadata available" > /tmp/torrent_info.txt
+          else
+            curl -sL "$URL" -o /tmp/torrent.torrent
+            transmission-show /tmp/torrent.torrent > /tmp/torrent_info.txt 2>&1 || aria2c --show-files /tmp/torrent.torrent > /tmp/torrent_info.txt 2>&1
+          fi
+
+          {
+            echo "# Torrent Info"
+            echo "**Date:** $(TZ='Asia/Tehran' date +'%Y-%m-%d %H:%M')"
+            echo "**URL:** \`$URL\`"
+            echo ""
+            echo '```'
+            cat /tmp/torrent_info.txt
+            echo '```'
+          } > history/$TS/info.md
+
+          git config --local user.email "action@github.com"
+          git config --local user.name "DownLord"
+          git add history/$TS/
+          git commit -m "Torrent info: $TS"
+          git push
+          exit 0
+
+      # ---------- SETUP FAST API FALLBACK ----------
+      - name: Setup YouTube API script
+        run: |
+          cat > /tmp/yt_api.py << 'PYEOF'
+          import os, sys, time, requests, re
+          url = sys.argv[1]
+          quality_input = sys.argv[2]
+          outdir = sys.argv[3]
+          API = 'https://hub.ytconvert.org/api/download'
+          HEADERS = {
+              'User-Agent': 'Mozilla/5.0',
+              'Accept': 'application/json',
+              'Referer': 'https://media.ytmp3.gg/',
+              'Origin': 'https://media.ytmp3.gg'
+          }
+          if "Audio" in quality_input:
+              payload = {'url': url, 'os': 'linux', 'output': {'type': 'audio', 'format': 'mp3'}, 'audio': {'bitrate': '320k'}}
+              ext = 'mp3'
+          elif "1080" in quality_input:
+              payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '1080p'}}
+              ext = 'mp4'
+          elif "720" in quality_input:
+              payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '720p'}}
+              ext = 'mp4'
+          elif "480" in quality_input:
+              payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '480p'}}
+              ext = 'mp4'
+          else:
+              payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '720p'}}
+              ext = 'mp4'
+          try:
+              resp = requests.post(API, json=payload, headers=HEADERS, timeout=15)
+              if resp.status_code != 200: sys.exit(1)
+              status_url = resp.json().get('statusUrl')
+              if not status_url: sys.exit(1)
+              for _ in range(60):
+                  time.sleep(2)
+                  s_resp = requests.get(status_url, headers=HEADERS, timeout=10)
+                  if s_resp.status_code == 200:
+                      data = s_resp.json()
+                      if data.get('status') == 'completed':
+                          dl_url = data.get('downloadUrl')
+                          raw_title = data.get('title', 'YouTube_Video')
+                          title = re.sub(r'[\\/*?:"<>| ]', '_', raw_title)
+                          if dl_url:
+                              filepath = os.path.join(outdir, f"{title}.{ext}")
+                              dl_req = requests.get(dl_url, stream=True, timeout=60)
+                              with open(filepath, "wb") as f:
+                                  for chunk in dl_req.iter_content(8192):
+                                      if chunk: f.write(chunk)
+                              print(f"DOWNLOADED:{filepath}")
+                              sys.exit(0)
+                      elif data.get('status') in ('failed', 'error'):
+                          sys.exit(1)
+              sys.exit(1)
+          except: sys.exit(1)
+          PYEOF
+          chmod +x /tmp/yt_api.py
+
+      # ---------- MAIN DOWNLOAD LOOP ----------
+      - name: Process each link
+        id: download
+        run: |
+          set -e
+          TS_BASE=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
+          > /tmp/errors.log
+
+          for URL in $LINKS; do
+            [ -z "$URL" ] && continue
+            echo "=== Processing: $URL ==="
+
+            # Determine download folder name
+            CLEAN=$(echo "$URL" | grep -oP 'dn=[^&]*' | sed 's/dn=//' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
+            [ -z "$CLEAN" ] && CLEAN=$(basename "$(echo "$URL" | sed 's/\?.*//')" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
+            [ -z "$CLEAN" ] && CLEAN="download"
+            DD="downloads/${TS_BASE}_${CLEAN}"
+            mkdir -p "$DD"
+
+            # Classify URL
+            IS_TORRENT=false; IS_YOUTUBE=false; IS_WEBPAGE=false
+            if [[ "$URL" == magnet:* ]] || echo "$URL" | grep -qE '\.torrent(\?.*)?$'; then
+              IS_TORRENT=true
+            elif echo "$URL" | grep -qE "(youtube|youtu\.be)"; then
+              IS_YOUTUBE=true
+            elif [ "$DOWNLOAD_MODE" = "webpage_archive" ]; then
+              IS_WEBPAGE=true
+            fi
+
+            # --- TORRENT DOWNLOAD ---
+            if [ "$IS_TORRENT" = true ]; then
+              if [[ "$URL" == magnet:* ]]; then
+                IN="$URL"
+              else
+                curl -sL "$URL" -o "$DD/torrent.torrent"
+                IN="$DD/torrent.torrent"
+              fi
+              ARGS="--seed-time=0 -x16 -s16 --dir=$DD --continue --file-allocation=falloc"
+              aria2c $ARGS "$IN" || echo "FAIL:$URL" >> /tmp/errors.log
+              rm -f "$DD/torrent.torrent"
+
+            # --- WEBPAGE ARCHIVE ---
+            elif [ "$IS_WEBPAGE" = true ]; then
+              DOMAIN=$(echo "$URL" | sed 's|https\?://||; s|/.*||')
+              monolith "$URL" -o "$DD/$DOMAIN.html" || echo "FAIL:$URL" >> /tmp/errors.log
+
+            # --- YOUTUBE ---
+            elif [ "$IS_YOUTUBE" = true ]; then
+              COOKIE_ARG=""
+              if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+                echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt
+                COOKIE_ARG="--cookies /tmp/cookies.txt"
+              fi
+              SUCCESS=false
+
+              # Try yt-dlp if cookies exist
+              if [ -n "$COOKIE_ARG" ]; then
+                echo "[YT] Cookies found — trying yt-dlp"
+                SUB_FLAG=""
+                case "$SUBTITLE_MODE" in
+                  manual) SUB_FLAG="--write-subs --embed-subs --sub-lang en" ;;
+                  auto) SUB_FLAG="--write-auto-subs --embed-subs --sub-lang en" ;;
+                esac
+                case "$QUALITY" in
+                  best) F="-f bestvideo+bestaudio/best --merge-output-format mp4" ;;
+                  1080p) F="-f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]' --merge-output-format mp4" ;;
+                  720p) F="-f 'bestvideo[height<=720]+bestaudio/best[height<=720]' --merge-output-format mp4" ;;
+                  480p) F="-f 'bestvideo[height<=480]+bestaudio/best[height<=480]' --merge-output-format mp4" ;;
+                  360p) F="-f 'bestvideo[height<=360]+bestaudio/best[height<=360]' --merge-output-format mp4" ;;
+                  audio_only) F="-x --audio-format mp3" ;;
+                esac
+                yt-dlp $COOKIE_ARG $F $SUB_FLAG --no-playlist --no-abort-on-error --restrict-filenames -o "$DD/%(title)s.%(ext)s" "$URL" && SUCCESS=true
+                if [ "$SUCCESS" = true ]; then
+                  # Thumbnail
+                  yt-dlp --write-thumbnail --skip-download -o "$DD/thumb" "$URL" 2>/dev/null
+                  ffmpeg -i "$DD/thumb.webp" "$DD/thumb.jpg" 2>/dev/null && rm "$DD/thumb.webp" || true
+                else
+                  echo "[YT] yt-dlp failed — falling back to Fast API"
+                fi
+              fi
+
+              # Fallback to Fast API
+              if [ "$SUCCESS" != true ]; then
+                echo "[YT] Using Fast API"
+                python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2>&1 | grep -q "DOWNLOADED:" && SUCCESS=true
+              fi
+
+              [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
+
+            # --- DIRECT / MEDIA SITE ---
+            else
+              # Use yt-dlp for known media sites, else aria2c
+              if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
+                COOKIE_ARG=""
+                [ -n "${{ secrets.YOUTUBE_COOKIES }}" ] && { echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt; COOKIE_ARG="--cookies /tmp/cookies.txt"; }
+                yt-dlp $COOKIE_ARG --no-playlist --restrict-filenames -o "$DD/%(title)s.%(ext)s" "$URL" || echo "FAIL:$URL" >> /tmp/errors.log
+              else
+                OUTFILE=$(basename "$(echo "$URL" | sed 's/\?.*//')" | sed 's/[^a-zA-Z0-9._-]/_/g')
+                aria2c -x16 -s16 --dir="$DD" --out="$OUTFILE" --continue --file-allocation=falloc "$URL" || echo "FAIL:$URL" >> /tmp/errors.log
+              fi
+            fi
+          done
+
+          echo "downloads_dir=downloads" >> $GITHUB_OUTPUT
+          echo "timestamp=$TS_BASE" >> $GITHUB_OUTPUT
+
+      # ---------- ARCHIVE MODE (zip torrent folder) ----------
+      - name: Archive torrent folder
+        if: env.STRUCTURE_MODE == 'archive'
+        run: |
+          for D in downloads/${TIMESTAMP}_*; do
+            [ -d "$D" ] || continue
+            # Only zip if it's a torrent download (has multiple files/subdirs)
+            FILE_COUNT=$(find "$D" -type f | wc -l)
+            if [ $FILE_COUNT -gt 1 ]; then
+              NAME=$(basename "$D")
+              7z a -tzip -mx0 -mmt=on "$D.zip" "$D" && rm -rf "$D"
+            fi
+          done
+
+      # ---------- SPLIT LARGE FILES ----------
+      - name: Split large files
+        if: env.STORAGE_MODE != 'artifact'
+        run: |
+          TS="${{ steps.download.outputs.timestamp }}"
+          for D in downloads/${TS}_*; do
+            [ -d "$D" ] || continue
+            find "$D" -type f ! -name "*.7z.*" -print0 | while IFS= read -r -d '' f; do
+              SIZE=$(stat -c%s "$f" 2>/dev/null)
+              BASENAME=$(basename "$f")
+              DIR=$(dirname "$f")
+              # Skip if already split
+              find "$DIR" -maxdepth 1 -name "$BASENAME.7z.*" | head -n1 | grep -q . && continue
+              if [ "$SIZE" -gt $((95*1048576)) ]; then
+                (echo "Split: $BASENAME"; 7z a -v95m -mx0 -mmt=on "$f.7z" "$f" && rm "$f") &
+              fi
             done
           done
-          
-          # Create download.sh in each folder
-          for folder in $DOWNLOAD_FOLDERS; do
-            [ ! -d "$folder" ] && continue
-            FOLDER_NAME=$(basename "$folder")
-            cat > "$folder/download.sh" << DOWNSCRIPT
+          wait
+
+      # ---------- ARTIFACT STORAGE ----------
+      - name: Upload as artifact
+        if: env.STORAGE_MODE == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-${{ steps.download.outputs.timestamp }}
+          path: downloads/
+          retention-days: 90
+
+      # ---------- GENERATE METADATA (non-artifact) ----------
+      - name: Generate per-download metadata
+        if: env.STORAGE_MODE != 'artifact'
+        run: |
+          TS="${{ steps.download.outputs.timestamp }}"
+          for D in downloads/${TS}_*; do
+            [ -d "$D" ] || continue
+            FOLDER=$(basename "$D")
+            mkdir -p "history/$TS"
+            
+            # manifest.json
+            echo "{\"timestamp\":\"$TS\",\"folder\":\"$FOLDER\",\"files\":[" > "history/$TS/manifest.json"
+            FIRST=true
+            find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+              REL="${f#$D/}"
+              SZ=$(stat -c%s "$f")
+              HS=$(sha256sum "$f" | cut -d' ' -f1)
+              [ "$FIRST" = false ] && echo "," >> "history/$TS/manifest.json"
+              FIRST=false
+              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "history/$TS/manifest.json"
+            done
+            echo "]}" >> "history/$TS/manifest.json"
+
+            # SHA256SUMS
+            (cd "$D" && sha256sum * > SHA256SUMS)
+
+            # links.txt (raw URLs)
+            BRANCH="${GITHUB_REF_NAME:-main}"
+            REPO="${{ github.repository }}"
+            find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+              REL="${f#$D/}"
+              echo "https://raw.githubusercontent.com/$REPO/$BRANCH/downloads/$FOLDER/$REL"
+            done > "history/$TS/links.txt"
+
+            # download.sh
+            cat > "$D/download.sh" << EOF
           #!/bin/bash
           REPO="https://github.com/$REPO.git"
-          BRANCH="${BRANCH:-main}"
-          FOLDER="downloads/$FOLDER_NAME"
-          echo "Cloning \$FOLDER from \$REPO (branch: \$BRANCH)..."
-          git clone --depth 1 --filter=blob:none --no-checkout \$REPO tmp-\$\$
-          cd tmp-\$\$ && git sparse-checkout init --cone
-          git sparse-checkout set \$FOLDER
+          BRANCH="$BRANCH"
+          FOLDER="downloads/$FOLDER"
+          git clone --depth 1 --filter=blob:none --no-checkout "\$REPO" tmp
+          cd tmp
+          git sparse-checkout init --cone
+          git sparse-checkout set "\$FOLDER"
           git checkout
-          echo "Done: tmp-\$\$/\$FOLDER"
-          DOWNSCRIPT
-            chmod +x "$folder/download.sh"
+          echo "Done: tmp/\$FOLDER"
+          EOF
+            chmod +x "$D/download.sh"
           done
-          
-          echo "TOTAL_SIZE=$TOTAL_SIZE" >> $GITHUB_ENV
-          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
-          echo "STATUS=$STATUS" >> $GITHUB_ENV
-          echo "SOURCE_TYPE=$SOURCE_TYPE" >> $GITHUB_ENV
 
-      - name: Update history README
+      # ---------- UPDATE HISTORY (Python script) ----------
+      - name: Update history and indexes
+        if: env.STORAGE_MODE != 'artifact'
         run: |
-          SESSION_ID="${{ env.SESSION_ID }}"
-          TIMESTAMP="${{ env.TIMESTAMP }}"
-          TOTAL_SIZE="${{ env.TOTAL_SIZE }}"
-          FILE_COUNT="${{ env.FILE_COUNT }}"
-          STATUS="${{ env.STATUS }}"
-          SOURCE_TYPE="${{ env.SOURCE_TYPE }}"
-          
-          STATUS_ICON="🔴"
-          [ "$STATUS" = "partial" ] && STATUS_ICON="🟡"
-          [ "$STATUS" = "success" ] && STATUS_ICON="🟢"
-          
-          HUMAN_SIZE=$(numfmt --to=iec $TOTAL_SIZE 2>/dev/null || echo "${TOTAL_SIZE}B")
-          
-          ENTRY="## ${STATUS_ICON} Session $SESSION_ID — $HUMAN_SIZE — $TIMESTAMP"
-          ENTRY="${ENTRY}\n**Source:** $SOURCE_TYPE | **Parts:** $FILE_COUNT"
-          ENTRY="${ENTRY}\n📁 [Files](../downloads/${SESSION_ID}_*/) | 📋 [Manifest]($SESSION_ID/manifest.json) | 📥 [Links]($SESSION_ID/links.txt)\n"
-          
-          if grep -q "## Sessions" history/README.md; then
-            sed -i "/## Sessions/a\\${ENTRY}" history/README.md
-          else
-          
-            echo -e "$ENTRY" >> history/README.md
+          cat > /tmp/update_history.py << 'PYEOF'
+          import json, os, re, time
+          from collections import defaultdict
+
+          ts = os.environ['TS']
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          mode = os.environ['DOWNLOAD_MODE']
+          quality = os.environ.get('QUALITY','best')
+          subtitle = os.environ.get('SUBTITLE_MODE','none')
+          structure = os.environ.get('STRUCTURE_MODE','flat')
+          storage = os.environ.get('STORAGE_MODE','main')
+
+          history_dir = f"history/{ts}"
+          manifest_path = os.path.join(history_dir, "manifest.json")
+          readme_path = "history/README.md"
+          links_path = os.path.join(history_dir, "links.txt")
+          index_path = "INDEX.md"
+          badge_path = "history/badge.svg"
+          bootstrap_path = "BOOTSTRAP.md"
+          trigger_template = ".trigger.template"
+
+          # Load manifest
+          with open(manifest_path) as f:
+              m = json.load(f)
+
+          folder = m['folder']
+          dd = f"downloads/{folder}"
+          timestamp_display = time.strftime('%Y-%m-%d %H:%M', time.localtime())  # Will be overwritten
+
+          # Parse files into normal and split groups
+          normal = []
+          splits = defaultdict(list)
+          for fi in m['files']:
+              p = fi['path']
+              mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
+              if mt:
+                  splits[mt.group(1)].append(fi)
+              else:
+                  normal.append(fi)
+
+          # Build links and entry lines
+          raw_links = []
+          entry_lines = []
+          entry_lines.append(f"## 🟢 {folder} — {sum(f['size'] for f in m['files'])} bytes — {timestamp_display}")
+          entry_lines.append(f"**Mode:** {mode} | **Storage:** {storage} | **Quality:** {quality} | **Subtitles:** {subtitle} | **Torrent:** {structure}")
+          entry_lines.append("")
+
+          def raw_url(path):
+              return f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{path}"
+
+          def git_cmd(path):
+              return f"`git sparse-checkout add {dd}/{path} && git checkout`"
+
+          # Normal files
+          for fi in normal:
+              url = raw_url(fi['path'])
+              raw_links.append(url)
+              entry_lines.append(f"- 📄 [{fi['path']}]({url}) — {fi['size']} bytes | {git_cmd(fi['path'])}")
+
+          # Split files
+          for base, parts in sorted(splits.items()):
+              parts.sort(key=lambda x: x['path'])
+              total = sum(p['size'] for p in parts)
+              entry_lines.append(f"- 📦 {base}.7z ({len(parts)} parts, {total} bytes)")
+              for p in parts:
+                  url = raw_url(p['path'])
+                  raw_links.append(url)
+                  entry_lines.append(f"  - [{p['path']}]({url}) — {p['size']} bytes | {git_cmd(p['path'])}")
+              entry_lines.append(f"  💡 Extract: `7z x {parts[0]['path']}`")
+
+          entry_lines.append("")
+          entry_lines.append(f"📥 [Download all links](https://github.com/{repo}/raw/refs/heads/{branch}/history/{ts}/links.txt) | 💾 [Git script](https://github.com/{repo}/raw/refs/heads/{branch}/{dd}/download.sh)")
+          entry_lines.append("")
+          entry_lines.append("---")
+          entry_text = "\n".join(entry_lines) + "\n"
+
+          # Write links.txt
+          with open(links_path, 'w') as f:
+              f.write("\n".join(raw_links) + "\n")
+
+          # Update HISTORY.md
+          total_size = 0
+          count = 0
+          if os.path.exists(readme_path):
+              with open(readme_path) as f:
+                  existing = f.read()
+          else:
+              existing = "# 📥 Download History\n\nNo downloads yet.\n"
+          # Calculate totals from all manifests
+          for root, dirs, files in os.walk("history"):
+              for mf in files:
+                  if mf == "manifest.json":
+                      with open(os.path.join(root, mf)) as f:
+                          data = json.load(f)
+                      total_size += sum(fi['size'] for fi in data['files'])
+                      count += 1
+          header = f"# 📥 Download History\n**Total Size:** {total_size/1073741824:.1f} GB | **Downloads:** {count}\n\n---\n\n"
+          # Insert new entry after header
+          if "## 🟢" in existing or "## 🔴" in existing or "## 🟡" in existing:
+              parts = existing.split("---\n", 1)
+              new_content = parts[0] + "---\n\n" + entry_text + parts[1] if len(parts) > 1 else header + entry_text
+          else:
+              new_content = header + entry_text
+          with open(readme_path, 'w') as f:
+              f.write(new_content)
+
+          # Generate INDEX.md
+          index_lines = ["# Content Index", "", "| Folder | Files | Download |", "|--------|-------|----------|"]
+          for root, dirs, files in os.walk("history"):
+              for mf in files:
+                  if mf == "manifest.json":
+                      with open(os.path.join(root, mf)) as f:
+                          data = json.load(f)
+                      idx = os.path.basename(root)
+                      folder = data['folder']
+                      fcount = len(data['files'])
+                      index_lines.append(f"| {folder} | {fcount} | `bash downloads/{folder}/download.sh` |")
+          with open(index_path, 'w') as f:
+              f.write("\n".join(index_lines) + "\n")
+
+          # Generate badge.svg
+          size_gb = total_size / 1073741824
+          badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">📦 {size_gb:.1f} GB | 📂 {count} downloads</text></svg>'
+          with open(badge_path, 'w') as f:
+              f.write(badge_svg)
+
+          # Generate BOOTSTRAP.md if missing
+          if not os.path.exists(bootstrap_path):
+              with open(bootstrap_path, 'w') as f:
+                  f.write(f"""# Git-Only Access
+
+          If raw.githubusercontent.com is blocked, use git.
+
+          ## Browse history
+          ```bash
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/{repo}.git
+          cd {repo.split('/')[1]}
+          git sparse-checkout init --cone
+          git sparse-checkout set history/ BOOTSTRAP.md INDEX.md
+          git checkout
+          cat history/README.md
+          ```
+
+          ## Download a folder
+          ```bash
+          git sparse-checkout add downloads/FOLDER_NAME/
+          git checkout
+          ```
+
+          ## Use a download script
+          ```bash
+          bash downloads/FOLDER_NAME/download.sh
+          ```
+          """)
+
+          # Generate .trigger.template if missing
+          if not os.path.exists(trigger_template):
+              with open(trigger_template, 'w') as f:
+                  f.write("""# DownLord Trigger
+          # Copy to .trigger, add links, push
+          links=https://example.com/file.zip
+          storage_mode=main
+          download_mode=download
+          video_quality=best
+          subtitle_mode=manual
+          structure_mode=flat
+          """)
+          print("History updated.")
+          PYEOF
+
+          export TS="${{ steps.download.outputs.timestamp }}"
+          export REPO="${{ github.repository }}"
+          export BRANCH="${{ github.ref_name }}"
+          export DOWNLOAD_MODE="$DOWNLOAD_MODE"
+          export QUALITY="$QUALITY"
+          export SUBTITLE_MODE="$SUBTITLE_MODE"
+          export STRUCTURE_MODE="$STRUCTURE_MODE"
+          export STORAGE_MODE="$STORAGE_MODE"
+          python3 /tmp/update_history.py
+
+      # ---------- COMMIT & PUSH (main/branch) ----------
+      - name: Commit and push (main mode)
+        if: env.STORAGE_MODE == 'main'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "DownLord"
+          git add .github/ history/ INDEX.md BOOTSTRAP.md .trigger.template || true
+
+          # Add download folders in batches
+          TS="${{ steps.download.outputs.timestamp }}"
+          BATCH_SIZE=0
+          BATCH_NUM=1
+          > /tmp/batch_files.txt
+          for D in downloads/${TS}_*; do
+            [ -d "$D" ] || continue
+            find "$D" -type f -print0 | while IFS= read -r -d '' f; do
+              SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
+              echo "$f" >> /tmp/batch_files.txt
+              BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
+              if [ $BATCH_SIZE -ge 1000 ]; then
+                echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
+                while IFS= read -r line; do git add "$line"; done < /tmp/batch_files.txt
+                git commit -m "Download $TS (batch $BATCH_NUM)" || true
+                git pull --rebase origin ${{ github.ref_name }} || true
+                git push
+                BATCH_NUM=$((BATCH_NUM + 1))
+                BATCH_SIZE=0
+                > /tmp/batch_files.txt
+              fi
+            done
+          done
+          # Final batch
+          if [ -s /tmp/batch_files.txt ]; then
+            while IFS= read -r line; do git add "$line"; done < /tmp/batch_files.txt
+            git commit -m "Download $TS (final)" || true
+            git pull --rebase origin ${{ github.ref_name }} || true
+            git push
           fi
 
-      - name: Generate badge SVG
-        run: |
-          TOTAL_SIZE="${{ env.TOTAL_SIZE }}"
-          FILE_COUNT="${{ env.FILE_COUNT }}"
-          HUMAN_SIZE=$(numfmt --to=iec $TOTAL_SIZE 2>/dev/null || echo "${TOTAL_SIZE}B")
-          
-          cat > history/badge.svg << SVG
-          <svg xmlns="http://www.w3.org/2000/svg" width="320" height="40">
-            <rect width="320" height="40" fill="#1a1a2e" rx="6"/>
-            <text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">
-              📦 ${HUMAN_SIZE}  |  📂 ${FILE_COUNT} downloads
-            </text>
-          </svg>
-          SVG
+          # Push any remaining history changes
+          git diff --cached --quiet || { git commit -m "History update $TS" && git push; }
 
-      - name: Commit history and cleanup
+      - name: Commit and push (branch mode)
+        if: env.STORAGE_MODE == 'branch'
         run: |
-          git add history/ 2>/dev/null || true
-          git add .cache/aria2_session.txt 2>/dev/null || true
-          git add downloads/*/download.sh 2>/dev/null || true
-          git add .gitattributes .trigger.template BOOTSTRAP.md INDEX.md 2>/dev/null || true
-          
-          # Remove .trigger if it exists
-          if [ -f .trigger ]; then
-            git rm --cached .trigger 2>/dev/null || true
-            rm -f .trigger
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "History update for session ${{ env.SESSION_ID }}"
-            git pull --rebase origin ${{ github.ref_name }} 2>/dev/null || true
-            git push origin ${{ github.ref_name }} || echo "Push failed, but continuing..."
-          else
-            echo "No history changes to commit"
-          fi
-
-      - name: Summary
-        run: |
-          echo "═══════════════════════════════════"
-          echo "  DOWNLOAD SESSION COMPLETE"
-          echo "═══════════════════════════════════"
-          echo "Session ID: ${{ env.SESSION_ID }}"
-          echo "Timestamp:  ${{ env.TIMESTAMP }}"
-          echo "Status:     ${{ env.STATUS }}"
-          echo "Total Size: $(numfmt --to=iec ${{ env.TOTAL_SIZE }} 2>/dev/null || echo ${{ env.TOTAL_SIZE }}B)"
-          echo "Files:      ${{ env.FILE_COUNT }}"
-          echo "Storage:    ${{ env.storage_mode }}"
-          echo "Structure:  ${{ env.structure_mode }}"
-          echo ""
-          echo "[INFO] Complete"
-          echo "═══════════════════════════════════"
+          git config --local user.email "action@github.com"
+          git config --local user.name "DownLord"
+          TS="${{ steps.download.outputs.timestamp }}"
+          git checkout --orphan "download-$TS"
+          git reset --hard
+          for D in downloads/${TS}_*; do
+            [ -d "$D" ] && git add "$D"
+          done
+          git add history/$TS/
+          git commit -m "Download $TS"
+          git push origin "download-$TS"
