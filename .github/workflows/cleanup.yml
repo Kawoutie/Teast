@@ -35,18 +35,16 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "DownLord"
 
-          # Delete all download folders
-          echo "--- Downloads ---"
-          for D in downloads/*; do
-            [ -d "$D" ] || continue
+                    # Delete entire downloads folder (if it exists)
+          if [ -d downloads ]; then
             if [ "$DRY" = "true" ]; then
-              echo "[DRY RUN] Would delete: $D"
+              echo "[DRY RUN] Would delete downloads/ folder"
             else
-              echo "Deleting: $D"
-              git rm -r "$D"
+              echo "Deleting downloads/ folder"
+              git rm -rf downloads/ 2>/dev/null || rm -rf downloads/
             fi
-          done
-
+          fi
+          
           # Delete entire history folder (will be recreated on next run)
           echo "--- History ---"
           if [ -d history ]; then
