@@ -3,6 +3,19 @@
 
 ---
 
+## 🟢 20260528_135733_Dopamine-3.0.3.rpm — 102157747 bytes — 20260528_135733
+**Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
+
+| File | Size | Download |
+|------|------|----------|
+| 📦 Dopamine-3.0.3.rpm.7z (2 parts) | 97 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_135733_Dopamine-3.0.3.rpm/Dopamine-3.0.3.rpm.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;├─ Dopamine-3.0.3.rpm.7z.001 | 95 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_135733_Dopamine-3.0.3.rpm/Dopamine-3.0.3.rpm.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;└─ Dopamine-3.0.3.rpm.7z.002 | 2 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_135733_Dopamine-3.0.3.rpm/Dopamine-3.0.3.rpm.7z.002) |
+
+📥 [All links (links.txt)](https://raw.githubusercontent.com/Kawoutie/Teast/main/history/20260528_135733/20260528_135733_Dopamine-3.0.3.rpm_links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_135733_Dopamine-3.0.3.rpm/download.sh)
+
+---
+
 ## 🟢 20260528_134837_Dopamine-3.0.3.AppImage —  — 20260528_134837
 **Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
 
