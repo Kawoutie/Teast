@@ -166,12 +166,13 @@ jobs:
             chmod +x /usr/local/bin/yt-dlp
           fi
           if ! command -v ffmpeg; then
-            curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar xJ -C /tmp/
-            cp /tmp/ffmpeg-*-static/ffmpeg /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
-            rm -rf /tmp/ffmpeg-*
+            curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-nonfree-linux64-gpl.tar.xz -o /tmp/ffmpeg.tar.xz
+            tar xf /tmp/ffmpeg.tar.xz -C /tmp/
+            cp /tmp/ffmpeg-nonfree-linux64-gpl-*/ffmpeg /tmp/ffmpeg-nonfree-linux64-gpl-*/ffprobe /usr/local/bin/
+            rm -rf /tmp/ffmpeg-nonfree-linux64-gpl-* /tmp/ffmpeg.tar.xz
           fi
           date +%s > .github/.last_media_update
-
+          
       - name: Install monolith (webpage archive)
         if: env.DOWNLOAD_MODE == 'webpage_archive'
         run: |
