@@ -67,20 +67,19 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-- uses: actions/checkout@v4
-  with:
-    token: ${{ secrets.GITHUB_TOKEN }}
-    sparse-checkout: |
-      .github/
-      history/
-      .cache/
-      .trigger
-      .trigger.template
-      BOOTSTRAP.md
-      INDEX.md
-      README.md
-    sparse-checkout-cone-mode: false
-    
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            .github/
+            history/
+            .cache/
+            .trigger
+            .trigger.template
+            BOOTSTRAP.md
+            INDEX.md
+            README.md
+
       - name: Handle trigger file
         if: github.event_name == 'push'
         run: |
@@ -416,19 +415,13 @@ jobs:
               echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
             done
             echo "]}" >> "$MANIFEST"
-
-            # SHA256SUMS
             (cd "$D" && sha256sum * > SHA256SUMS)
-
-            # links.txt
             BRANCH="${GITHUB_REF_NAME:-main}"
             REPO="${{ github.repository }}"
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
               REL="${f#$D/}"
               echo "https://raw.githubusercontent.com/$REPO/$BRANCH/downloads/$FOLDER/$REL"
             done > "history/$TS/${FOLDER}_links.txt"
-
-            # download.sh
             cat > "$D/download.sh" << EOF
           #!/bin/bash
           REPO="https://github.com/$REPO.git"
@@ -443,7 +436,7 @@ jobs:
           EOF
             chmod +x "$D/download.sh"
           done
-          
+
       - name: Update history and indexes
         if: env.STORAGE_MODE != 'artifact'
         run: |
@@ -460,7 +453,6 @@ jobs:
           structure = os.environ.get('STRUCTURE_MODE','flat')
           storage = os.environ.get('STORAGE_MODE','main')
 
-          # Read failures
           failures = set()
           if os.path.exists('/tmp/errors.log'):
               with open('/tmp/errors.log') as ef:
@@ -468,7 +460,6 @@ jobs:
                       if line.startswith('FAIL:'):
                           failures.add(line.strip().split(':',1)[1].strip())
 
-          # Determine status per download folder
           folder_status = {}
           if os.path.exists('/tmp/folder_urls.txt'):
               with open('/tmp/folder_urls.txt') as f:
@@ -496,7 +487,6 @@ jobs:
               }
               return emoji_map.get(ext, '📄')
 
-          # Process only the current session's manifests
           new_entries = []
           total_session_size = 0
           total_session_count = 0
@@ -506,7 +496,7 @@ jobs:
                   data = json.load(f)
               folder = data['folder']
               dd = f"downloads/{folder}"
-              session_ts = data['timestamp']  # same as ts
+              session_ts = data['timestamp']
 
               normal = []
               splits = defaultdict(list)
@@ -522,12 +512,10 @@ jobs:
               icon = '🔴' if status == 'failed' else '🟢' if status == 'success' else '🟡'
 
               rows = []
-              # Normal files
               for fi in normal:
                   raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{fi['path']}"
                   size = fi.get('size',0)
                   rows.append((file_emoji(fi['path']), fi['path'], size, raw, False, 0))
-              # Split groups
               for base, parts in sorted(splits.items()):
                   parts.sort(key=lambda x: x['path'])
                   total_part_size = sum(p['size'] for p in parts)
@@ -561,16 +549,12 @@ jobs:
               total_session_size += sum(fi['size'] for fi in data['files'])
               total_session_count += 1
 
-          # Update HISTORY.md – insert new entries after the header
           readme_path = "history/README.md"
-          # Calculate total stats from all manifests (old + new)
           total_size = total_session_size
           total_count = total_session_count
-          # Walk all history to sum sizes from existing manifests
           for root, dirs, files in os.walk("history"):
               for mf in files:
                   if mf.endswith('.json') and os.path.dirname(os.path.join(root, mf)) != f"history/{ts}":
-                      # old manifest
                       try:
                           with open(os.path.join(root, mf)) as f:
                               old_data = json.load(f)
@@ -582,7 +566,6 @@ jobs:
           if os.path.exists(readme_path):
               with open(readme_path) as f:
                   existing = f.read()
-              # Insert new entries right after the first --- line
               if "---" in existing:
                   parts = existing.split("---\n", 1)
                   new_content = parts[0] + "---\n\n" + "\n".join(new_entries) + "\n" + parts[1]
@@ -593,7 +576,6 @@ jobs:
           with open(readme_path, 'w') as f:
               f.write(new_content)
 
-          # Update INDEX.md
           index_lines = ["# Content Index", "", "| Folder | Files | Git Command |", "|--------|-------|-------------|"]
           for root, dirs, files in os.walk("history"):
               for mf in files:
@@ -608,13 +590,11 @@ jobs:
           with open('INDEX.md', 'w') as f:
               f.write("\n".join(index_lines) + "\n")
 
-          # Generate badge.svg
           size_gb = total_size / 1073741824
           badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">📦 {size_gb:.1f} GB | 📂 {total_count} downloads</text></svg>'
           with open('history/badge.svg', 'w') as f:
               f.write(badge_svg)
 
-          # Bootstrap and trigger template if missing
           if not os.path.exists('BOOTSTRAP.md'):
               with open('BOOTSTRAP.md', 'w') as f:
                   f.write(f"""# Git-Only Access
@@ -654,7 +634,7 @@ jobs:
           subtitle_mode=manual
           structure_mode=flat
           """)
-          print("History updated.")
+          print("History and indexes updated.")
           PYEOF
 
           export TS="${{ steps.download.outputs.timestamp }}"
