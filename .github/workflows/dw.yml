@@ -131,17 +131,13 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: /usr/local/bin/yt-dlp
-          key: ytdlp-static-${{ hashFiles('.github/.last_media_update') }}
-      - uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/ffmpeg
-          key: ffmpeg-static-${{ hashFiles('.github/.last_media_update') }}
-      - uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/ffprobe
-          key: ffprobe-static-${{ hashFiles('.github/.last_media_update') }}
-
+          path: |
+            /usr/local/bin/yt-dlp
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
+          key: media-tools-${{ hashFiles('.github/.last_media_update') }}
+          restore-keys: |
+            media-tools-
       - name: Install media tools if needed
         run: |
           URLS="$LINKS"
