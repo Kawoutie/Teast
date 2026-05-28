@@ -368,19 +368,24 @@ jobs:
                   echo "[YT] yt-dlp failed — falling back to Fast API"
                 fi
               fi
-                          if [ "$SUCCESS" != true ]; then
-              echo "[YT] Using Fast API"
-              API_OUTPUT=$(python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2> /tmp/yt_api_debug.log)
-              echo "$API_OUTPUT"
-              echo "=== Debug log from Fast API ==="
-              cat /tmp/yt_api_debug.log
-              echo "==============================="
-              if echo "$API_OUTPUT" | grep -q "DOWNLOADED:"; then
-                SUCCESS=true
-              else
-                echo "FAIL:$URL" >> /tmp/errors.log
+              if [ "$SUCCESS" != true ]; then
+                echo "[YT] Using Fast API"
+                set +e
+                python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" > /tmp/yt_api_stdout.txt 2> /tmp/yt_api_stderr.txt
+                API_EXIT_CODE=$?
+                set -e
+                echo "[DEBUG] Fast API exit code: $API_EXIT_CODE"
+                echo "[DEBUG] === STDOUT ==="
+                cat /tmp/yt_api_stdout.txt
+                echo "[DEBUG] === STDERR ==="
+                cat /tmp/yt_api_stderr.txt
+                echo "[DEBUG] === END ==="
+                if grep -q "DOWNLOADED:" /tmp/yt_api_stdout.txt; then
+                  SUCCESS=true
+                else
+                  echo "FAIL:$URL" >> /tmp/errors.log
+                fi
               fi
-            fi
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
             else
               if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
@@ -395,7 +400,7 @@ jobs:
           done
           echo "downloads_dir=downloads" >> $GITHUB_OUTPUT
           echo "timestamp=$TS_BASE" >> $GITHUB_OUTPUT
-
+          
       - name: Archive torrent folder
         if: env.STRUCTURE_MODE == 'archive'
         run: |
