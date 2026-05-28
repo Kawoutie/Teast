@@ -142,17 +142,6 @@ jobs:
           path: /usr/local/bin/ffprobe
           key: ffprobe-static-${{ hashFiles('.github/.last_media_update') }}
 
-      - name: Debug ffmpeg download
-        run: |
-          URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-          echo "Trying URL: $URL"
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o /tmp/ffmpeg_debug "$URL")
-          echo "HTTP status: $HTTP_CODE"
-          echo "File type:"
-          file /tmp/ffmpeg_debug || true
-          echo "First 200 bytes:"
-          head -c 200 /tmp/ffmpeg_debug || true
-          
       - name: Install media tools if needed
         run: |
           URLS="$LINKS"
@@ -184,7 +173,7 @@ jobs:
             rm -rf /tmp/ffmpeg-master-latest-linux64-gpl /tmp/ffmpeg.tar.xz
           fi
           date +%s > .github/.last_media_update
-          
+
       - name: Install monolith (webpage archive)
         if: env.DOWNLOAD_MODE == 'webpage_archive'
         run: |
@@ -228,9 +217,9 @@ jobs:
 
       - name: Setup YouTube API scripts
         run: |
-          # Fast API (hub.ytconvert.org) - original script with debug
+          # Fast API (hub.ytconvert.org) - clean version
           cat > /tmp/yt_api.py << 'PYEOF'
-          import os, sys, time, requests, re, json, traceback
+          import os, sys, time, requests, re
           url = sys.argv[1]
           quality_input = sys.argv[2]
           outdir = sys.argv[3]
@@ -257,48 +246,31 @@ jobs:
               payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '720p'}}
               ext = 'mp4'
           try:
-              print(f"[DEBUG] Sending request to API with payload: {payload}", file=sys.stderr)
               resp = requests.post(API, json=payload, headers=HEADERS, timeout=15)
-              print(f"[DEBUG] POST status: {resp.status_code}", file=sys.stderr)
-              print(f"[DEBUG] Response body: {resp.text[:300]}", file=sys.stderr)
-              if resp.status_code != 200:
-                  print("[DEBUG] Non-200 response, exiting", file=sys.stderr)
-                  sys.exit(1)
+              if resp.status_code != 200: sys.exit(1)
               status_url = resp.json().get('statusUrl')
-              print(f"[DEBUG] Status URL: {status_url}", file=sys.stderr)
-              if not status_url:
-                  print("[DEBUG] No status URL", file=sys.stderr)
-                  sys.exit(1)
-              for i in range(60):
+              if not status_url: sys.exit(1)
+              for _ in range(60):
                   time.sleep(2)
                   s_resp = requests.get(status_url, headers=HEADERS, timeout=10)
-                  print(f"[DEBUG] Poll {i}: status={s_resp.status_code}", file=sys.stderr)
                   if s_resp.status_code == 200:
                       data = s_resp.json()
-                      print(f"[DEBUG] Poll data: {json.dumps(data)[:200]}", file=sys.stderr)
                       if data.get('status') == 'completed':
                           dl_url = data.get('downloadUrl')
                           raw_title = data.get('title', 'YouTube_Video')
                           title = re.sub(r'[\\/*?:"<>| ]', '_', raw_title)
                           if dl_url:
-                              print(f"[DEBUG] Download URL obtained: {dl_url[:100]}...", file=sys.stderr)
                               filepath = os.path.join(outdir, f"{title}.{ext}")
-                              print(f"[DEBUG] Starting download to {filepath}", file=sys.stderr)
                               dl_req = requests.get(dl_url, stream=True, timeout=60)
                               with open(filepath, "wb") as f:
                                   for chunk in dl_req.iter_content(8192):
                                       if chunk: f.write(chunk)
-                              print(f"[DEBUG] Download complete, size: {os.path.getsize(filepath)} bytes", file=sys.stderr)
                               print(f"DOWNLOADED:{filepath}")
                               sys.exit(0)
                       elif data.get('status') in ('failed', 'error'):
-                          print(f"[DEBUG] Conversion failed: {data}", file=sys.stderr)
                           sys.exit(1)
-              print("[DEBUG] Timed out waiting for completion", file=sys.stderr)
               sys.exit(1)
-          except Exception as e:
-              print(f"[DEBUG] Exception: {traceback.format_exc()}", file=sys.stderr)
-              sys.exit(1)
+          except: sys.exit(1)
           PYEOF
           chmod +x /tmp/yt_api.py
 
@@ -323,7 +295,6 @@ jobs:
           if __name__ == "__main__":
               url = sys.argv[1]
               q = sys.argv[2]
-              # Map quality input to format_note expected by API
               mapping = {"1080p":"1080", "720p":"720", "480p":"480", "360p":"360", "Audio":"audio"}
               quality = mapping.get(q, "720")
               link = get_link(url, quality)
@@ -333,7 +304,7 @@ jobs:
                   print("FAILED")
           PYEOF
           chmod +x /tmp/yt_api2.py
-          
+
       - name: Process each link
         id: download
         run: |
@@ -378,7 +349,6 @@ jobs:
                 COOKIE_ARG="--cookies /tmp/cookies.txt"
               fi
               SUCCESS=false
-              # ---- Tier 0: yt-dlp (if cookies available) ----
               if [ -n "$COOKIE_ARG" ]; then
                 echo "[YT] Cookies found — trying yt-dlp"
                 SUB_FLAG=""
@@ -402,37 +372,24 @@ jobs:
                   echo "[YT] yt-dlp failed — will try APIs"
                 fi
               fi
-              # ---- Tier 1: Fast API (hub.ytconvert.org) ----
               if [ "$SUCCESS" != true ]; then
                 echo "[YT] Trying Fast API (hub.ytconvert.org)"
-                set +e
-                python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" > /tmp/yt_api_stdout.txt 2> /tmp/yt_api_stderr.txt
-                API_EXIT_CODE=$?
-                set -e
-                echo "[DEBUG] Fast API exit code: $API_EXIT_CODE"
-                if grep -q "DOWNLOADED:" /tmp/yt_api_stdout.txt; then
+                if python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2>/dev/null | grep -q "DOWNLOADED:"; then
                   SUCCESS=true
                 else
-                  echo "[YT] Fast API failed"
-                  # ---- Tier 2: Backup API (youtubedl-api) ----
-                  echo "[YT] Trying backup API (youtubedl-api.herokuapp.com)"
+                  echo "[YT] Fast API failed – trying backup API"
                   API_OUTPUT2=$(python3 /tmp/yt_api2.py "$URL" "$QUALITY" 2>/dev/null)
-                  echo "Backup API output: $API_OUTPUT2"
                   DL_URL=$(echo "$API_OUTPUT2" | grep -oP 'DOWNLOAD_URL:\K.*')
                   if [ -n "$DL_URL" ]; then
                     echo "Resolved URL: $DL_URL"
                     OUTFILE=$(echo "$URL" | grep -oP 'dn=[^&]*' | sed 's/dn=//' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
                     [ -z "$OUTFILE" ] && OUTFILE="youtube_video.mp4"
                     aria2c -x16 -s16 --dir="$DD" --out="$OUTFILE" --continue --file-allocation=falloc "$DL_URL" && SUCCESS=true
-                  else
-                    echo "[YT] Backup API also failed"
                   fi
                 fi
               fi
-              # ---- Mark failure if all methods failed ----
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
             else
-              # ---- Non-YouTube / generic media site ----
               if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
                 COOKIE_ARG=""
                 [ -n "${{ secrets.YOUTUBE_COOKIES }}" ] && { echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt; COOKIE_ARG="--cookies /tmp/cookies.txt"; }
@@ -445,7 +402,7 @@ jobs:
           done
           echo "downloads_dir=downloads" >> $GITHUB_OUTPUT
           echo "timestamp=$TS_BASE" >> $GITHUB_OUTPUT
-          
+
       - name: Archive torrent folder
         if: env.STRUCTURE_MODE == 'archive'
         run: |
@@ -504,7 +461,6 @@ jobs:
               echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
             done
             echo "]}" >> "$MANIFEST"
-            # Robust SHA256SUMS – never fails on empty folders
             find "$D" -maxdepth 1 -type f -exec sha256sum {} + > "$D/SHA256SUMS"
             BRANCH="${GITHUB_REF_NAME:-main}"
             REPO="${{ github.repository }}"
@@ -526,7 +482,7 @@ jobs:
           EOF
             chmod +x "$D/download.sh"
           done
-          
+
       - name: Update history and indexes
         if: env.STORAGE_MODE != 'artifact'
         run: |
