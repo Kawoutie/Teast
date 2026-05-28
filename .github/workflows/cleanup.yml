@@ -1,3 +1,32 @@
+name: Full Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (list only, no deletions)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            .github/
+            history/
+            .cache/
+            BOOTSTRAP.md
+            INDEX.md
+            README.md
+          fetch-depth: 1
+
       - name: Full cleanup
         run: |
           DRY="${{ github.event.inputs.dry_run }}"
@@ -28,8 +57,8 @@
               git rm -rf history/
             fi
           fi
-
-          # Delete INDEX.md (will be regenerated)
+          
+          # Delete INDEX.md
           if [ -f INDEX.md ]; then
             if [ "$DRY" = "true" ]; then
               echo "[DRY RUN] Would delete INDEX.md"
@@ -38,7 +67,7 @@
               git rm INDEX.md
             fi
           fi
-
+          
           # Delete all session branches
           echo "--- Branches ---"
           git fetch --all
@@ -56,7 +85,7 @@
             if git diff --cached --quiet; then
               echo "Nothing to commit"
             else
-              git commit -m "Full cleanup - removed all downloads, history, INDEX.md, and session branches"
+              git commit -m "Full cleanup - removed all downloads, history, and session branches"
               git push
             fi
           fi
