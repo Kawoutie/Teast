@@ -1,0 +1,77 @@
+name: Full Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (list only, no deletions)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            .github/
+            history/
+            .cache/
+            BOOTSTRAP.md
+            INDEX.md
+            README.md
+          fetch-depth: 1
+
+      - name: Full cleanup
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+
+          # Delete all download folders
+          echo "--- Downloads ---"
+          for D in downloads/*; do
+            [ -d "$D" ] || continue
+            if [ "$DRY" = "true" ]; then
+              echo "[DRY RUN] Would delete: $D"
+            else
+              echo "Deleting: $D"
+              git rm -r "$D"
+            fi
+          done
+
+          # Delete entire history folder (will be recreated on next run)
+          echo "--- History ---"
+          if [ -d history ]; then
+            if [ "$DRY" = "true" ]; then
+              echo "[DRY RUN] Would delete entire history/ folder"
+            else
+              echo "Deleting history/ folder"
+              git rm -rf history/
+            fi
+          fi
+
+          # Delete all session branches
+          echo "--- Branches ---"
+          git fetch --all
+          for branch in $(git branch -r | grep 'origin/download-' | sed 's/origin\///'); do
+            if [ "$DRY" = "true" ]; then
+              echo "[DRY RUN] Would delete branch: $branch"
+            else
+              echo "Deleting branch: $branch"
+              git push origin --delete "$branch"
+            fi
+          done
+
+          # Commit and push if not dry run
+          if [ "$DRY" = "false" ]; then
+            if git diff --cached --quiet; then
+              echo "Nothing to commit"
+            else
+              git commit -m "Full cleanup - removed all downloads, history, and session branches"
+              git push
+            fi
+          fi
