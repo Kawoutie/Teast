@@ -142,6 +142,17 @@ jobs:
           path: /usr/local/bin/ffprobe
           key: ffprobe-static-${{ hashFiles('.github/.last_media_update') }}
 
+      - name: Debug ffmpeg download
+        run: |
+          URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+          echo "Trying URL: $URL"
+          HTTP_CODE=$(curl -sL -w "%{http_code}" -o /tmp/ffmpeg_debug "$URL")
+          echo "HTTP status: $HTTP_CODE"
+          echo "File type:"
+          file /tmp/ffmpeg_debug || true
+          echo "First 200 bytes:"
+          head -c 200 /tmp/ffmpeg_debug || true
+          
       - name: Install media tools if needed
         run: |
           URLS="$LINKS"
