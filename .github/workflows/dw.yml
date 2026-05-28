@@ -72,7 +72,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      # ---------- TRIGGER FILE HANDLING ----------
       - name: Handle trigger file
         if: github.event_name == 'push'
         run: |
@@ -88,7 +87,6 @@ jobs:
             echo "No trigger file"; exit 0
           fi
 
-      # ---------- SET INPUTS ----------
       - name: Set inputs
         id: inputs
         run: |
@@ -108,8 +106,7 @@ jobs:
             echo "STRUCTURE_MODE=${{ github.event.inputs.structure_mode }}" >> $GITHUB_ENV
           fi
 
-      # ---------- CORE TOOLS (7-day apt cache) ----------
-      - name: Install core tools
+      - name: Install core tools (7-day apt cache)
         run: |
           if command -v aria2c && command -v 7z && command -v jq; then
             if [ -f .github/.last_apt_update ]; then
@@ -124,7 +121,6 @@ jobs:
           sudo apt-get install -y aria2 p7zip-full p7zip-rar curl jq python3 python3-requests
           date +%s > .github/.last_apt_update
 
-      # ---------- MEDIA TOOLS CACHE ----------
       - uses: actions/cache@v4
         with:
           path: /usr/local/bin/yt-dlp
@@ -180,14 +176,12 @@ jobs:
         run: |
           ( command -v yt-dlp && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp.new && chmod +x /usr/local/bin/yt-dlp.new ) &
 
-      # ---------- TORRENT INFO MODE ----------
       - name: Torrent info mode
         if: env.DOWNLOAD_MODE == 'torrent_info'
         run: |
-          URL=$(echo "$LINKS" | head -n1)  # Use first link
+          URL=$(echo "$LINKS" | head -n1)
           TS=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
           mkdir -p history/$TS
-
           if [[ "$URL" == magnet:* ]]; then
             sudo apt-get install -y transmission-cli
             transmission-show "$URL" > /tmp/torrent_info.txt 2>&1 || echo "No metadata available" > /tmp/torrent_info.txt
@@ -195,7 +189,6 @@ jobs:
             curl -sL "$URL" -o /tmp/torrent.torrent
             transmission-show /tmp/torrent.torrent > /tmp/torrent_info.txt 2>&1 || aria2c --show-files /tmp/torrent.torrent > /tmp/torrent_info.txt 2>&1
           fi
-
           {
             echo "# Torrent Info"
             echo "**Date:** $(TZ='Asia/Tehran' date +'%Y-%m-%d %H:%M')"
@@ -205,7 +198,6 @@ jobs:
             cat /tmp/torrent_info.txt
             echo '```'
           } > history/$TS/info.md
-
           git config --local user.email "action@github.com"
           git config --local user.name "DownLord"
           git add history/$TS/
@@ -213,7 +205,6 @@ jobs:
           git push
           exit 0
 
-      # ---------- SETUP FAST API FALLBACK ----------
       - name: Setup YouTube API script
         run: |
           cat > /tmp/yt_api.py << 'PYEOF'
@@ -272,26 +263,22 @@ jobs:
           PYEOF
           chmod +x /tmp/yt_api.py
 
-      # ---------- MAIN DOWNLOAD LOOP ----------
       - name: Process each link
         id: download
         run: |
           set -e
           TS_BASE=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
           > /tmp/errors.log
-
+          > /tmp/folder_urls.txt
           for URL in $LINKS; do
             [ -z "$URL" ] && continue
             echo "=== Processing: $URL ==="
-
-            # Determine download folder name
             CLEAN=$(echo "$URL" | grep -oP 'dn=[^&]*' | sed 's/dn=//' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
             [ -z "$CLEAN" ] && CLEAN=$(basename "$(echo "$URL" | sed 's/\?.*//')" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
             [ -z "$CLEAN" ] && CLEAN="download"
             DD="downloads/${TS_BASE}_${CLEAN}"
             mkdir -p "$DD"
-
-            # Classify URL
+            echo "FOLDER=$DD URL=$URL" >> /tmp/folder_urls.txt
             IS_TORRENT=false; IS_YOUTUBE=false; IS_WEBPAGE=false
             if [[ "$URL" == magnet:* ]] || echo "$URL" | grep -qE '\.torrent(\?.*)?$'; then
               IS_TORRENT=true
@@ -300,8 +287,6 @@ jobs:
             elif [ "$DOWNLOAD_MODE" = "webpage_archive" ]; then
               IS_WEBPAGE=true
             fi
-
-            # --- TORRENT DOWNLOAD ---
             if [ "$IS_TORRENT" = true ]; then
               if [[ "$URL" == magnet:* ]]; then
                 IN="$URL"
@@ -312,13 +297,9 @@ jobs:
               ARGS="--seed-time=0 -x16 -s16 --dir=$DD --continue --file-allocation=falloc"
               aria2c $ARGS "$IN" || echo "FAIL:$URL" >> /tmp/errors.log
               rm -f "$DD/torrent.torrent"
-
-            # --- WEBPAGE ARCHIVE ---
             elif [ "$IS_WEBPAGE" = true ]; then
               DOMAIN=$(echo "$URL" | sed 's|https\?://||; s|/.*||')
               monolith "$URL" -o "$DD/$DOMAIN.html" || echo "FAIL:$URL" >> /tmp/errors.log
-
-            # --- YOUTUBE ---
             elif [ "$IS_YOUTUBE" = true ]; then
               COOKIE_ARG=""
               if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
@@ -326,8 +307,6 @@ jobs:
                 COOKIE_ARG="--cookies /tmp/cookies.txt"
               fi
               SUCCESS=false
-
-              # Try yt-dlp if cookies exist
               if [ -n "$COOKIE_ARG" ]; then
                 echo "[YT] Cookies found — trying yt-dlp"
                 SUB_FLAG=""
@@ -345,25 +324,18 @@ jobs:
                 esac
                 yt-dlp $COOKIE_ARG $F $SUB_FLAG --no-playlist --no-abort-on-error --restrict-filenames -o "$DD/%(title)s.%(ext)s" "$URL" && SUCCESS=true
                 if [ "$SUCCESS" = true ]; then
-                  # Thumbnail
                   yt-dlp --write-thumbnail --skip-download -o "$DD/thumb" "$URL" 2>/dev/null
                   ffmpeg -i "$DD/thumb.webp" "$DD/thumb.jpg" 2>/dev/null && rm "$DD/thumb.webp" || true
                 else
                   echo "[YT] yt-dlp failed — falling back to Fast API"
                 fi
               fi
-
-              # Fallback to Fast API
               if [ "$SUCCESS" != true ]; then
                 echo "[YT] Using Fast API"
                 python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2>&1 | grep -q "DOWNLOADED:" && SUCCESS=true
               fi
-
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
-
-            # --- DIRECT / MEDIA SITE ---
             else
-              # Use yt-dlp for known media sites, else aria2c
               if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
                 COOKIE_ARG=""
                 [ -n "${{ secrets.YOUTUBE_COOKIES }}" ] && { echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt; COOKIE_ARG="--cookies /tmp/cookies.txt"; }
@@ -374,17 +346,14 @@ jobs:
               fi
             fi
           done
-
           echo "downloads_dir=downloads" >> $GITHUB_OUTPUT
           echo "timestamp=$TS_BASE" >> $GITHUB_OUTPUT
 
-      # ---------- ARCHIVE MODE (zip torrent folder) ----------
       - name: Archive torrent folder
         if: env.STRUCTURE_MODE == 'archive'
         run: |
           for D in downloads/${TIMESTAMP}_*; do
             [ -d "$D" ] || continue
-            # Only zip if it's a torrent download (has multiple files/subdirs)
             FILE_COUNT=$(find "$D" -type f | wc -l)
             if [ $FILE_COUNT -gt 1 ]; then
               NAME=$(basename "$D")
@@ -392,7 +361,6 @@ jobs:
             fi
           done
 
-      # ---------- SPLIT LARGE FILES ----------
       - name: Split large files
         if: env.STORAGE_MODE != 'artifact'
         run: |
@@ -403,7 +371,6 @@ jobs:
               SIZE=$(stat -c%s "$f" 2>/dev/null)
               BASENAME=$(basename "$f")
               DIR=$(dirname "$f")
-              # Skip if already split
               find "$DIR" -maxdepth 1 -name "$BASENAME.7z.*" | head -n1 | grep -q . && continue
               if [ "$SIZE" -gt $((95*1048576)) ]; then
                 (echo "Split: $BASENAME"; 7z a -v95m -mx0 -mmt=on "$f.7z" "$f" && rm "$f") &
@@ -412,7 +379,6 @@ jobs:
           done
           wait
 
-      # ---------- ARTIFACT STORAGE ----------
       - name: Upload as artifact
         if: env.STORAGE_MODE == 'artifact'
         uses: actions/upload-artifact@v4
@@ -421,7 +387,6 @@ jobs:
           path: downloads/
           retention-days: 90
 
-      # ---------- GENERATE METADATA (non-artifact) ----------
       - name: Generate per-download metadata
         if: env.STORAGE_MODE != 'artifact'
         run: |
@@ -430,8 +395,6 @@ jobs:
             [ -d "$D" ] || continue
             FOLDER=$(basename "$D")
             mkdir -p "history/$TS"
-            
-            # manifest.json
             echo "{\"timestamp\":\"$TS\",\"folder\":\"$FOLDER\",\"files\":[" > "history/$TS/manifest.json"
             FIRST=true
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
@@ -443,19 +406,13 @@ jobs:
               echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "history/$TS/manifest.json"
             done
             echo "]}" >> "history/$TS/manifest.json"
-
-            # SHA256SUMS
             (cd "$D" && sha256sum * > SHA256SUMS)
-
-            # links.txt (raw URLs)
             BRANCH="${GITHUB_REF_NAME:-main}"
             REPO="${{ github.repository }}"
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
               REL="${f#$D/}"
               echo "https://raw.githubusercontent.com/$REPO/$BRANCH/downloads/$FOLDER/$REL"
             done > "history/$TS/links.txt"
-
-            # download.sh
             cat > "$D/download.sh" << EOF
           #!/bin/bash
           REPO="https://github.com/$REPO.git"
@@ -471,7 +428,6 @@ jobs:
             chmod +x "$D/download.sh"
           done
 
-      # ---------- UPDATE HISTORY (Python script) ----------
       - name: Update history and indexes
         if: env.STORAGE_MODE != 'artifact'
         run: |
@@ -488,123 +444,147 @@ jobs:
           structure = os.environ.get('STRUCTURE_MODE','flat')
           storage = os.environ.get('STORAGE_MODE','main')
 
-          history_dir = f"history/{ts}"
-          manifest_path = os.path.join(history_dir, "manifest.json")
-          readme_path = "history/README.md"
-          links_path = os.path.join(history_dir, "links.txt")
-          index_path = "INDEX.md"
-          badge_path = "history/badge.svg"
-          bootstrap_path = "BOOTSTRAP.md"
-          trigger_template = ".trigger.template"
+          failures = set()
+          if os.path.exists('/tmp/errors.log'):
+              with open('/tmp/errors.log') as ef:
+                  for line in ef:
+                      if line.startswith('FAIL:'):
+                          failures.add(line.strip().split(':',1)[1].strip())
 
-          # Load manifest
-          with open(manifest_path) as f:
-              m = json.load(f)
+          folder_status = {}
+          if os.path.exists('/tmp/folder_urls.txt'):
+              with open('/tmp/folder_urls.txt') as f:
+                  for line in f:
+                      if '=' not in line: continue
+                      parts = line.strip().split(' ', 1)
+                      folder = None; url = None
+                      for part in parts:
+                          if part.startswith('FOLDER='):
+                              folder = part.split('=',1)[1]
+                          elif part.startswith('URL='):
+                              url = part.split('=',1)[1]
+                      if folder and url:
+                          if url in failures:
+                              folder_status[folder] = 'failed'
+                          else:
+                              folder_status[folder] = 'success'
 
-          folder = m['folder']
-          dd = f"downloads/{folder}"
-          timestamp_display = time.strftime('%Y-%m-%d %H:%M', time.localtime())  # Will be overwritten
-
-          # Parse files into normal and split groups
-          normal = []
-          splits = defaultdict(list)
-          for fi in m['files']:
-              p = fi['path']
-              mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
-              if mt:
-                  splits[mt.group(1)].append(fi)
-              else:
-                  normal.append(fi)
-
-          # Build links and entry lines
-          raw_links = []
-          entry_lines = []
-          entry_lines.append(f"## 🟢 {folder} — {sum(f['size'] for f in m['files'])} bytes — {timestamp_display}")
-          entry_lines.append(f"**Mode:** {mode} | **Storage:** {storage} | **Quality:** {quality} | **Subtitles:** {subtitle} | **Torrent:** {structure}")
-          entry_lines.append("")
-
-          def raw_url(path):
-              return f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{path}"
-
-          def git_cmd(path):
-              return f"`git sparse-checkout add {dd}/{path} && git checkout`"
-
-          # Normal files
-          for fi in normal:
-              url = raw_url(fi['path'])
-              raw_links.append(url)
-              entry_lines.append(f"- 📄 [{fi['path']}]({url}) — {fi['size']} bytes | {git_cmd(fi['path'])}")
-
-          # Split files
-          for base, parts in sorted(splits.items()):
-              parts.sort(key=lambda x: x['path'])
-              total = sum(p['size'] for p in parts)
-              entry_lines.append(f"- 📦 {base}.7z ({len(parts)} parts, {total} bytes)")
-              for p in parts:
-                  url = raw_url(p['path'])
-                  raw_links.append(url)
-                  entry_lines.append(f"  - [{p['path']}]({url}) — {p['size']} bytes | {git_cmd(p['path'])}")
-              entry_lines.append(f"  💡 Extract: `7z x {parts[0]['path']}`")
-
-          entry_lines.append("")
-          entry_lines.append(f"📥 [Download all links](https://github.com/{repo}/raw/refs/heads/{branch}/history/{ts}/links.txt) | 💾 [Git script](https://github.com/{repo}/raw/refs/heads/{branch}/{dd}/download.sh)")
-          entry_lines.append("")
-          entry_lines.append("---")
-          entry_text = "\n".join(entry_lines) + "\n"
-
-          # Write links.txt
-          with open(links_path, 'w') as f:
-              f.write("\n".join(raw_links) + "\n")
-
-          # Update HISTORY.md
           total_size = 0
-          count = 0
-          if os.path.exists(readme_path):
-              with open(readme_path) as f:
-                  existing = f.read()
-          else:
-              existing = "# 📥 Download History\n\nNo downloads yet.\n"
-          # Calculate totals from all manifests
+          total_count = 0
+          new_entries = []
+
           for root, dirs, files in os.walk("history"):
               for mf in files:
                   if mf == "manifest.json":
                       with open(os.path.join(root, mf)) as f:
                           data = json.load(f)
-                      total_size += sum(fi['size'] for fi in data['files'])
-                      count += 1
-          header = f"# 📥 Download History\n**Total Size:** {total_size/1073741824:.1f} GB | **Downloads:** {count}\n\n---\n\n"
-          # Insert new entry after header
-          if "## 🟢" in existing or "## 🔴" in existing or "## 🟡" in existing:
-              parts = existing.split("---\n", 1)
-              new_content = parts[0] + "---\n\n" + entry_text + parts[1] if len(parts) > 1 else header + entry_text
+                      folder = data['folder']
+                      dd = f"downloads/{folder}"
+                      session_ts = data['timestamp']
+                      normal = []
+                      splits = defaultdict(list)
+                      for fi in data['files']:
+                          p = fi['path']
+                          mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
+                          if mt:
+                              splits[mt.group(1)].append(fi)
+                          else:
+                              normal.append(fi)
+
+                      status = folder_status.get(folder, 'success')
+                      if status == 'failed':
+                          icon = '🔴'
+                      elif status == 'success':
+                          icon = '🟢'
+                      else:
+                          icon = '🟡'
+
+                      def file_emoji(fname):
+                          ext = fname.lower().split('.')[-1] if '.' in fname else ''
+                          emoji_map = {
+                              'mp4': '🎬', 'mkv': '🎬', 'webm': '🎬',
+                              'mp3': '🎵', 'flac': '🎵', 'wav': '🎵',
+                              'zip': '🗜️', '7z': '🗜️', 'rar': '🗜️',
+                              'jpg': '🖼️', 'png': '🖼️', 'gif': '🖼️',
+                              'pdf': '📕', 'epub': '📗', 'html': '🌐',
+                              'srt': '💬', 'vtt': '💬'
+                          }
+                          return emoji_map.get(ext, '📄')
+
+                      rows = []
+                      for fi in normal:
+                          raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{fi['path']}"
+                          size = fi.get('size',0)
+                          rows.append((file_emoji(fi['path']), fi['path'], size, raw, False, 0))
+                      for base, parts in sorted(splits.items()):
+                          parts.sort(key=lambda x: x['path'])
+                          total_part_size = sum(p['size'] for p in parts)
+                          raw_first = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{parts[0]['path']}"
+                          rows.append(('📦', f"{base}.7z ({len(parts)} parts)", total_part_size, raw_first, True, len(parts)))
+                          for i, p in enumerate(parts):
+                              raw_p = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{p['path']}"
+                              prefix = '&nbsp;&nbsp;&nbsp;&nbsp;├─' if i < len(parts)-1 else '&nbsp;&nbsp;&nbsp;&nbsp;└─'
+                              rows.append(('', f"{prefix} {p['path']}", p['size'], raw_p, False, 0))
+
+                      entry_lines = []
+                      entry_lines.append(f"## {icon} {folder} — {data.get('total_size','')} — {session_ts}")
+                      entry_lines.append(f"**Mode:** {mode} | **Quality:** {quality} | **Subtitles:** {subtitle} | **Torrent:** {structure}")
+                      entry_lines.append("")
+                      entry_lines.append("| File | Size | Download |")
+                      entry_lines.append("|------|------|----------|")
+                      for emoji, name, size, url, is_group, part_count in rows:
+                          size_str = f"{size/1048576:.0f} MB" if size >= 1048576 else f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
+                          if emoji and not name.startswith('&nbsp'):
+                              display_name = f"{emoji} {name}"
+                          else:
+                              display_name = name
+                          download_link = f"[⬇]({url})" if url else ""
+                          entry_lines.append(f"| {display_name} | {size_str} | {download_link} |")
+                      entry_lines.append("")
+                      entry_lines.append(f"📥 [All links (links.txt)](https://raw.githubusercontent.com/{repo}/{branch}/history/{session_ts}/links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/{repo}/{branch}/{dd}/download.sh)")
+                      entry_lines.append("")
+                      entry_lines.append("---")
+                      new_entries.append("\n".join(entry_lines))
+
+                      for fi in data['files']:
+                          total_size += fi.get('size',0)
+                      total_count += 1
+
+          header = f"# 📥 Download History\n**Total Size:** {total_size/1073741824:.1f} GB | **Downloads:** {total_count}\n\n---\n\n"
+          if os.path.exists('history/README.md'):
+              with open('history/README.md') as f:
+                  existing = f.read()
+              if "---" in existing:
+                  parts = existing.split("---\n", 1)
+                  new_content = parts[0] + "---\n\n" + "\n".join(new_entries) + "\n" + parts[1]
+              else:
+                  new_content = header + "\n".join(new_entries)
           else:
-              new_content = header + entry_text
-          with open(readme_path, 'w') as f:
+              new_content = header + "\n".join(new_entries)
+          with open('history/README.md', 'w') as f:
               f.write(new_content)
 
-          # Generate INDEX.md
-          index_lines = ["# Content Index", "", "| Folder | Files | Download |", "|--------|-------|----------|"]
+          index_lines = ["# Content Index", "", "| Folder | Files | Git Command |", "|--------|-------|-------------|"]
           for root, dirs, files in os.walk("history"):
               for mf in files:
                   if mf == "manifest.json":
                       with open(os.path.join(root, mf)) as f:
                           data = json.load(f)
-                      idx = os.path.basename(root)
                       folder = data['folder']
+                      dd = f"downloads/{folder}"
                       fcount = len(data['files'])
-                      index_lines.append(f"| {folder} | {fcount} | `bash downloads/{folder}/download.sh` |")
-          with open(index_path, 'w') as f:
+                      git_cmd = f"`git sparse-checkout add {dd}/ && git checkout`"
+                      index_lines.append(f"| {folder} | {fcount} | {git_cmd} |")
+          with open('INDEX.md', 'w') as f:
               f.write("\n".join(index_lines) + "\n")
 
-          # Generate badge.svg
           size_gb = total_size / 1073741824
-          badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">📦 {size_gb:.1f} GB | 📂 {count} downloads</text></svg>'
-          with open(badge_path, 'w') as f:
+          badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">📦 {size_gb:.1f} GB | 📂 {total_count} downloads</text></svg>'
+          with open('history/badge.svg', 'w') as f:
               f.write(badge_svg)
 
-          # Generate BOOTSTRAP.md if missing
-          if not os.path.exists(bootstrap_path):
-              with open(bootstrap_path, 'w') as f:
+          if not os.path.exists('BOOTSTRAP.md'):
+              with open('BOOTSTRAP.md', 'w') as f:
                   f.write(f"""# Git-Only Access
 
           If raw.githubusercontent.com is blocked, use git.
@@ -631,9 +611,8 @@ jobs:
           ```
           """)
 
-          # Generate .trigger.template if missing
-          if not os.path.exists(trigger_template):
-              with open(trigger_template, 'w') as f:
+          if not os.path.exists('.trigger.template'):
+              with open('.trigger.template', 'w') as f:
                   f.write("""# DownLord Trigger
           # Copy to .trigger, add links, push
           links=https://example.com/file.zip
@@ -643,7 +622,7 @@ jobs:
           subtitle_mode=manual
           structure_mode=flat
           """)
-          print("History updated.")
+          print("History and indexes updated.")
           PYEOF
 
           export TS="${{ steps.download.outputs.timestamp }}"
@@ -656,15 +635,12 @@ jobs:
           export STORAGE_MODE="$STORAGE_MODE"
           python3 /tmp/update_history.py
 
-      # ---------- COMMIT & PUSH (main/branch) ----------
       - name: Commit and push (main mode)
         if: env.STORAGE_MODE == 'main'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "DownLord"
           git add .github/ history/ INDEX.md BOOTSTRAP.md .trigger.template || true
-
-          # Add download folders in batches
           TS="${{ steps.download.outputs.timestamp }}"
           BATCH_SIZE=0
           BATCH_NUM=1
@@ -687,15 +663,12 @@ jobs:
               fi
             done
           done
-          # Final batch
           if [ -s /tmp/batch_files.txt ]; then
             while IFS= read -r line; do git add "$line"; done < /tmp/batch_files.txt
             git commit -m "Download $TS (final)" || true
             git pull --rebase origin ${{ github.ref_name }} || true
             git push
           fi
-
-          # Push any remaining history changes
           git diff --cached --quiet || { git commit -m "History update $TS" && git push; }
 
       - name: Commit and push (branch mode)
