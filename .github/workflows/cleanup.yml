@@ -41,7 +41,7 @@ jobs:
               echo "[DRY RUN] Would delete downloads/ folder"
             else
               echo "Deleting downloads/ folder"
-              git rm -rf downloads/ 2>/dev/null || rm -rf downloads/
+              git rm -rf downloads/
             fi
           fi
           
