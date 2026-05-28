@@ -149,7 +149,7 @@ jobs:
           [[ "$MODE" == "torrent_info" || "$MODE" == "webpage_archive" ]] && exit 0
           NEED_MEDIA=false
           for URL in $URLS; do
-            if echo "$URL" | grep -qE "(youtube|youtu\.be|vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
+            if echo "$URL" | grep -qE "(youtube|youtu\.be|vimeo|tiktok|twitch|reddit|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
               NEED_MEDIA=true
               break
             fi
@@ -390,7 +390,7 @@ jobs:
               fi
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
             else
-              if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
+              if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|reddit|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
                 COOKIE_ARG=""
                 [ -n "${{ secrets.YOUTUBE_COOKIES }}" ] && { echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt; COOKIE_ARG="--cookies /tmp/cookies.txt"; }
                 yt-dlp $COOKIE_ARG --no-playlist --restrict-filenames -o "$DD/%(title)s.%(ext)s" "$URL" || echo "FAIL:$URL" >> /tmp/errors.log
