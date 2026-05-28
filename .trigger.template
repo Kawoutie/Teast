@@ -1,0 +1,8 @@
+# DownLord Trigger
+# Copy to .trigger, add links, push
+links=https://example.com/file.zip
+storage_mode=main
+download_mode=download
+video_quality=best
+subtitle_mode=manual
+structure_mode=flat
