@@ -665,7 +665,7 @@ jobs:
               BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
               if [ $BATCH_SIZE -ge 1000 ]; then
                 echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
-                while IFS= read -r line; do git add "$line"; done < /tmp/batch_files.txt
+                while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
                 git commit -m "Download $TS (batch $BATCH_NUM)" || true
                 git pull --rebase origin ${{ github.ref_name }} || true
                 git push
@@ -676,7 +676,7 @@ jobs:
             done
           done
           if [ -s /tmp/batch_files.txt ]; then
-            while IFS= read -r line; do git add "$line"; done < /tmp/batch_files.txt
+            while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
             git commit -m "Download $TS (final)" || true
             git pull --rebase origin ${{ github.ref_name }} || true
             git push
@@ -692,7 +692,7 @@ jobs:
           git checkout --orphan "download-$TS"
           git reset --hard
           for D in downloads/${TS}_*; do
-            [ -d "$D" ] && git add "$D"
+            [ -d "$D" ] && git add --sparse "$D"
           done
           git add history/$TS/
           git commit -m "Download $TS"
