@@ -226,8 +226,9 @@ jobs:
           git push
           exit 0
 
-      - name: Setup YouTube API script (DEBUG)
+      - name: Setup YouTube API scripts
         run: |
+          # Fast API (hub.ytconvert.org) - original script with debug
           cat > /tmp/yt_api.py << 'PYEOF'
           import os, sys, time, requests, re, json, traceback
           url = sys.argv[1]
@@ -300,6 +301,38 @@ jobs:
               sys.exit(1)
           PYEOF
           chmod +x /tmp/yt_api.py
+
+          # Backup API (youtubedl-api.herokuapp.com)
+          cat > /tmp/yt_api2.py << 'PYEOF'
+          import sys, requests, traceback
+
+          def get_link(url, quality):
+              api = "https://youtubedl-api.herokuapp.com/api"
+              try:
+                  r = requests.get(api, params={"url": url}, timeout=30)
+                  r.raise_for_status()
+                  data = r.json()
+                  for fmt in data.get("formats", []):
+                      if fmt.get("format_note") == quality and fmt.get("ext") == "mp4":
+                          return fmt["url"]
+                  return data["formats"][-1]["url"] if data["formats"] else None
+              except Exception as e:
+                  print(f"[YT2] {e}", file=sys.stderr)
+                  return None
+
+          if __name__ == "__main__":
+              url = sys.argv[1]
+              q = sys.argv[2]
+              # Map quality input to format_note expected by API
+              mapping = {"1080p":"1080", "720p":"720", "480p":"480", "360p":"360", "Audio":"audio"}
+              quality = mapping.get(q, "720")
+              link = get_link(url, quality)
+              if link:
+                  print(f"DOWNLOAD_URL:{link}")
+              else:
+                  print("FAILED")
+          PYEOF
+          chmod +x /tmp/yt_api2.py
           
       - name: Process each link
         id: download
@@ -345,6 +378,7 @@ jobs:
                 COOKIE_ARG="--cookies /tmp/cookies.txt"
               fi
               SUCCESS=false
+              # ---- Tier 0: yt-dlp (if cookies available) ----
               if [ -n "$COOKIE_ARG" ]; then
                 echo "[YT] Cookies found — trying yt-dlp"
                 SUB_FLAG=""
@@ -365,29 +399,40 @@ jobs:
                   yt-dlp --write-thumbnail --skip-download -o "$DD/thumb" "$URL" 2>/dev/null
                   ffmpeg -i "$DD/thumb.webp" "$DD/thumb.jpg" 2>/dev/null && rm "$DD/thumb.webp" || true
                 else
-                  echo "[YT] yt-dlp failed — falling back to Fast API"
+                  echo "[YT] yt-dlp failed — will try APIs"
                 fi
               fi
+              # ---- Tier 1: Fast API (hub.ytconvert.org) ----
               if [ "$SUCCESS" != true ]; then
-                echo "[YT] Using Fast API"
+                echo "[YT] Trying Fast API (hub.ytconvert.org)"
                 set +e
                 python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" > /tmp/yt_api_stdout.txt 2> /tmp/yt_api_stderr.txt
                 API_EXIT_CODE=$?
                 set -e
                 echo "[DEBUG] Fast API exit code: $API_EXIT_CODE"
-                echo "[DEBUG] === STDOUT ==="
-                cat /tmp/yt_api_stdout.txt
-                echo "[DEBUG] === STDERR ==="
-                cat /tmp/yt_api_stderr.txt
-                echo "[DEBUG] === END ==="
                 if grep -q "DOWNLOADED:" /tmp/yt_api_stdout.txt; then
                   SUCCESS=true
                 else
-                  echo "FAIL:$URL" >> /tmp/errors.log
+                  echo "[YT] Fast API failed"
+                  # ---- Tier 2: Backup API (youtubedl-api) ----
+                  echo "[YT] Trying backup API (youtubedl-api.herokuapp.com)"
+                  API_OUTPUT2=$(python3 /tmp/yt_api2.py "$URL" "$QUALITY" 2>/dev/null)
+                  echo "Backup API output: $API_OUTPUT2"
+                  DL_URL=$(echo "$API_OUTPUT2" | grep -oP 'DOWNLOAD_URL:\K.*')
+                  if [ -n "$DL_URL" ]; then
+                    echo "Resolved URL: $DL_URL"
+                    OUTFILE=$(echo "$URL" | grep -oP 'dn=[^&]*' | sed 's/dn=//' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-100)
+                    [ -z "$OUTFILE" ] && OUTFILE="youtube_video.mp4"
+                    aria2c -x16 -s16 --dir="$DD" --out="$OUTFILE" --continue --file-allocation=falloc "$DL_URL" && SUCCESS=true
+                  else
+                    echo "[YT] Backup API also failed"
+                  fi
                 fi
               fi
+              # ---- Mark failure if all methods failed ----
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
             else
+              # ---- Non-YouTube / generic media site ----
               if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
                 COOKIE_ARG=""
                 [ -n "${{ secrets.YOUTUBE_COOKIES }}" ] && { echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt; COOKIE_ARG="--cookies /tmp/cookies.txt"; }
