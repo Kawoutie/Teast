@@ -3,6 +3,19 @@
 
 ---
 
+## 🟢 20260528_152453_Dopamine-3.0.4-arm.dmg — 154154245 bytes — 20260528_152453
+**Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
+
+| File | Size | Download |
+|------|------|----------|
+| 📦 Dopamine-3.0.4-arm.dmg.7z (2 parts) | 147 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_152453_Dopamine-3.0.4-arm.dmg/Dopamine-3.0.4-arm.dmg.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;├─ Dopamine-3.0.4-arm.dmg.7z.001 | 95 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_152453_Dopamine-3.0.4-arm.dmg/Dopamine-3.0.4-arm.dmg.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;└─ Dopamine-3.0.4-arm.dmg.7z.002 | 52 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_152453_Dopamine-3.0.4-arm.dmg/Dopamine-3.0.4-arm.dmg.7z.002) |
+
+📥 [All links (links.txt)](https://raw.githubusercontent.com/Kawoutie/Teast/main/history/20260528_152453/20260528_152453_Dopamine-3.0.4-arm.dmg_links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_152453_Dopamine-3.0.4-arm.dmg/download.sh)
+
+---
+
 ## 🟢 20260528_150053_watch — 0 bytes — 20260528_150053
 **Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
 
