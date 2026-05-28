@@ -226,10 +226,10 @@ jobs:
           git push
           exit 0
 
-      - name: Setup YouTube API script
+      - name: Setup YouTube API script (DEBUG)
         run: |
           cat > /tmp/yt_api.py << 'PYEOF'
-          import os, sys, time, requests, re
+          import os, sys, time, requests, re, json, traceback
           url = sys.argv[1]
           quality_input = sys.argv[2]
           outdir = sys.argv[3]
@@ -256,34 +256,51 @@ jobs:
               payload = {'url': url, 'os': 'linux', 'output': {'type': 'video', 'format': 'mp4', 'quality': '720p'}}
               ext = 'mp4'
           try:
+              print(f"[DEBUG] Sending request to API with payload: {payload}", file=sys.stderr)
               resp = requests.post(API, json=payload, headers=HEADERS, timeout=15)
-              if resp.status_code != 200: sys.exit(1)
+              print(f"[DEBUG] POST status: {resp.status_code}", file=sys.stderr)
+              print(f"[DEBUG] Response body: {resp.text[:300]}", file=sys.stderr)
+              if resp.status_code != 200:
+                  print("[DEBUG] Non-200 response, exiting", file=sys.stderr)
+                  sys.exit(1)
               status_url = resp.json().get('statusUrl')
-              if not status_url: sys.exit(1)
-              for _ in range(60):
+              print(f"[DEBUG] Status URL: {status_url}", file=sys.stderr)
+              if not status_url:
+                  print("[DEBUG] No status URL", file=sys.stderr)
+                  sys.exit(1)
+              for i in range(60):
                   time.sleep(2)
                   s_resp = requests.get(status_url, headers=HEADERS, timeout=10)
+                  print(f"[DEBUG] Poll {i}: status={s_resp.status_code}", file=sys.stderr)
                   if s_resp.status_code == 200:
                       data = s_resp.json()
+                      print(f"[DEBUG] Poll data: {json.dumps(data)[:200]}", file=sys.stderr)
                       if data.get('status') == 'completed':
                           dl_url = data.get('downloadUrl')
                           raw_title = data.get('title', 'YouTube_Video')
                           title = re.sub(r'[\\/*?:"<>| ]', '_', raw_title)
                           if dl_url:
+                              print(f"[DEBUG] Download URL obtained: {dl_url[:100]}...", file=sys.stderr)
                               filepath = os.path.join(outdir, f"{title}.{ext}")
+                              print(f"[DEBUG] Starting download to {filepath}", file=sys.stderr)
                               dl_req = requests.get(dl_url, stream=True, timeout=60)
                               with open(filepath, "wb") as f:
                                   for chunk in dl_req.iter_content(8192):
                                       if chunk: f.write(chunk)
+                              print(f"[DEBUG] Download complete, size: {os.path.getsize(filepath)} bytes", file=sys.stderr)
                               print(f"DOWNLOADED:{filepath}")
                               sys.exit(0)
                       elif data.get('status') in ('failed', 'error'):
+                          print(f"[DEBUG] Conversion failed: {data}", file=sys.stderr)
                           sys.exit(1)
+              print("[DEBUG] Timed out waiting for completion", file=sys.stderr)
               sys.exit(1)
-          except: sys.exit(1)
+          except Exception as e:
+              print(f"[DEBUG] Exception: {traceback.format_exc()}", file=sys.stderr)
+              sys.exit(1)
           PYEOF
           chmod +x /tmp/yt_api.py
-
+          
       - name: Process each link
         id: download
         run: |
@@ -351,10 +368,19 @@ jobs:
                   echo "[YT] yt-dlp failed — falling back to Fast API"
                 fi
               fi
-              if [ "$SUCCESS" != true ]; then
-                echo "[YT] Using Fast API"
-                python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2>&1 | grep -q "DOWNLOADED:" && SUCCESS=true
+                          if [ "$SUCCESS" != true ]; then
+              echo "[YT] Using Fast API"
+              API_OUTPUT=$(python3 /tmp/yt_api.py "$URL" "$QUALITY" "$DD" 2> /tmp/yt_api_debug.log)
+              echo "$API_OUTPUT"
+              echo "=== Debug log from Fast API ==="
+              cat /tmp/yt_api_debug.log
+              echo "==============================="
+              if echo "$API_OUTPUT" | grep -q "DOWNLOADED:"; then
+                SUCCESS=true
+              else
+                echo "FAIL:$URL" >> /tmp/errors.log
               fi
+            fi
               [ "$SUCCESS" != true ] && echo "FAIL:$URL" >> /tmp/errors.log
             else
               if echo "$URL" | grep -qE "(vimeo|tiktok|twitch|dailymotion|bilibili|soundcloud|spotify|bandcamp|mixcloud|audiomack|deezer|tidal)"; then
@@ -428,7 +454,8 @@ jobs:
               echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
             done
             echo "]}" >> "$MANIFEST"
-            (cd "$D" && sha256sum * > SHA256SUMS)
+            # Robust SHA256SUMS – never fails on empty folders
+            find "$D" -maxdepth 1 -type f -exec sha256sum {} + > "$D/SHA256SUMS"
             BRANCH="${GITHUB_REF_NAME:-main}"
             REPO="${{ github.repository }}"
             find "$D" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
@@ -449,7 +476,7 @@ jobs:
           EOF
             chmod +x "$D/download.sh"
           done
-
+          
       - name: Update history and indexes
         if: env.STORAGE_MODE != 'artifact'
         run: |
