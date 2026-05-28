@@ -3,6 +3,19 @@
 
 ---
 
+## 🟢 20260528_142408_Dopamine-3.0.3.snap — 138191082 bytes — 20260528_142408
+**Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
+
+| File | Size | Download |
+|------|------|----------|
+| 📦 Dopamine-3.0.3.snap.7z (2 parts) | 132 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_142408_Dopamine-3.0.3.snap/Dopamine-3.0.3.snap.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;├─ Dopamine-3.0.3.snap.7z.001 | 95 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_142408_Dopamine-3.0.3.snap/Dopamine-3.0.3.snap.7z.001) |
+| &nbsp;&nbsp;&nbsp;&nbsp;└─ Dopamine-3.0.3.snap.7z.002 | 37 MB | [⬇](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_142408_Dopamine-3.0.3.snap/Dopamine-3.0.3.snap.7z.002) |
+
+📥 [All links (links.txt)](https://raw.githubusercontent.com/Kawoutie/Teast/main/history/20260528_142408/20260528_142408_Dopamine-3.0.3.snap_links.txt) | 💾 [Git download script](https://raw.githubusercontent.com/Kawoutie/Teast/main/downloads/20260528_142408_Dopamine-3.0.3.snap/download.sh)
+
+---
+
 ## 🟢 20260528_135733_Dopamine-3.0.3.rpm — 102157747 bytes — 20260528_135733
 **Mode:** download | **Quality:** best | **Subtitles:** manual | **Torrent:** flat
 
