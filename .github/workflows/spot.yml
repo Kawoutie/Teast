@@ -1,4 +1,4 @@
-name: SpotiFLAC Downloader
+name: SpotiFLAC
 
 on:
   workflow_dispatch:
@@ -92,7 +92,7 @@ jobs:
             history/
           sparse-checkout-cone-mode: false
 
-      # ========== DEPENDENCY MANAGEMENT (DownLord style, no aria2) ==========
+      # ========== DEPENDENCY MANAGEMENT ==========
       - name: Install core tools (7-day apt cache)
         run: |
           if command -v 7z && command -v jq && command -v curl; then
@@ -155,7 +155,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
+          # No cache parameter to avoid missing requirements file error
 
       - name: Install SpotiFLAC
         run: |
@@ -202,7 +202,7 @@ jobs:
           fi
           echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
 
-      # ========== CREATE DOWNLOAD SCRIPT (like DownLord's yt_api.py) ==========
+      # ========== CREATE DOWNLOAD SCRIPT ==========
       - name: Create download script
         run: |
           cat > /tmp/spotiflac_download.py << 'PYEOF'
@@ -251,7 +251,6 @@ jobs:
                   url = url.strip()
                   if not url:
                       continue
-                  # Sanitize folder name
                   if '/track/' in url:
                       safe = url.split('/')[-1]
                   elif '/album/' in url:
@@ -277,13 +276,26 @@ jobs:
                   f.write(timestamp)
 
               print(f"Processed {len(folder_urls)} links, {len(errors)} failures.")
-              # Write output for GitHub Actions
-              print(f"::set-output name=timestamp::{timestamp}")
+              # GitHub Actions output
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
+                  gh.write(f"timestamp={timestamp}\n")
 
           if __name__ == '__main__':
               main()
           PYEOF
           chmod +x /tmp/spotiflac_download.py
+
+      - name: Run download script
+        id: download
+        run: |
+          export SPOTIFY_LINKS="${{ github.event.inputs.spotify_links }}"
+          export SPOTIFLAC_ARGS="${{ steps.args.outputs.ARGS }}"
+          TIMESTAMP=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
+          export TIMESTAMP
+          python3 /tmp/spotiflac_download.py
+          # Output is already written to GITHUB_OUTPUT by the script; we can also read file
+          TS=$(cat /tmp/timestamp.txt)
+          echo "timestamp=$TS" >> $GITHUB_OUTPUT
 
       - name: Run download script
         id: download
