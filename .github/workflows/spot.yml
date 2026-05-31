@@ -69,6 +69,35 @@ on:
           - flat
           - preserve
           - archive
+      # ----- NEW CONVERSION OPTIONS -----
+      enable_conversion:
+        description: 'Convert downloaded files to another format'
+        required: false
+        default: false
+        type: boolean
+      target_format:
+        description: 'Target container (M4A = AAC)'
+        required: false
+        default: 'm4a'
+        type: choice
+        options:
+          - mp3
+          - m4a
+          - ogg
+          - opus
+          - wav
+      audio_bitrate:
+        description: 'Bitrate for lossy formats (kbps)'
+        required: false
+        default: '320k'
+        type: choice
+        options:
+          - 320k
+          - 256k
+          - 192k
+          - 128k
+          - 96k
+          - 64k
 
 permissions:
   contents: write
@@ -87,7 +116,7 @@ jobs:
             history/
           sparse-checkout-cone-mode: false
 
-      # ========== DEPENDENCY MANAGEMENT (DownLord style, no aria2) ==========
+      # ========== DEPENDENCY MANAGEMENT ==========
       - name: Install core tools (7-day apt cache)
         run: |
           if command -v 7z && command -v jq && command -v curl; then
@@ -155,7 +184,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install SpotiFLAC
-          spotiflac --version 2>/dev/null || echo "SpotiFLAC installed (CLI ready)"
+          spotiflac --version 2>/dev/null || echo "SpotiFLAC CLI ready"
 
       - name: Prepare authentication
         run: |
@@ -183,7 +212,6 @@ jobs:
           elif [ "$PROVIDER_MODE" = "specific" ] && [ -n "$SPECIFIC" ]; then
             ARGS="-s $SPECIFIC"
           fi
-          # auto mode: no -s
           ARGS="$ARGS --quality ${{ github.event.inputs.quality }}"
           if [ "${{ github.event.inputs.artist_subfolders }}" = "true" ]; then
             ARGS="$ARGS --use-artist-subfolders"
@@ -194,7 +222,7 @@ jobs:
           fi
           echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
 
-      # ========== CREATE DOWNLOAD SCRIPT (with file-count verification) ==========
+      # ========== DOWNLOAD SCRIPT (with file‑count verification) ==========
       - name: Create download script
         run: |
           cat > /tmp/spotiflac_download.py << 'PYEOF'
@@ -202,7 +230,6 @@ jobs:
           import os, sys, subprocess, time, hashlib
 
           def get_file_set(dirpath):
-              """Return set of filenames in dirpath."""
               if not os.path.isdir(dirpath):
                   return set()
               return {f for f in os.listdir(dirpath) if os.path.isfile(os.path.join(dirpath, f))}
@@ -211,10 +238,10 @@ jobs:
               cmd = ['spotiflac', url, outdir] + args_list
               for attempt in range(1, max_retries + 1):
                   print(f"Attempt {attempt} for {url}")
-                  before_files = get_file_set(outdir)
+                  before = get_file_set(outdir)
                   result = subprocess.run(cmd, capture_output=True, text=True)
-                  after_files = get_file_set(outdir)
-                  new_files = after_files - before_files
+                  after = get_file_set(outdir)
+                  new_files = after - before
                   if result.returncode == 0 and new_files:
                       print(f"SUCCESS:{url} (new files: {len(new_files)})")
                       if result.stdout:
@@ -222,11 +249,11 @@ jobs:
                       return True
                   else:
                       if result.returncode != 0:
-                          print(f"Attempt {attempt} failed: exit code {result.returncode}", file=sys.stderr)
+                          print(f"Attempt {attempt} failed: exit {result.returncode}", file=sys.stderr)
                           if result.stderr:
                               print(result.stderr, file=sys.stderr)
                       elif not new_files:
-                          print(f"Attempt {attempt} reported success but no new files appeared", file=sys.stderr)
+                          print(f"Attempt {attempt} reported success but no new files", file=sys.stderr)
                       if attempt < max_retries:
                           time.sleep(delay)
                       else:
@@ -239,20 +266,15 @@ jobs:
               if not links:
                   print("No links provided", file=sys.stderr)
                   sys.exit(1)
-
               args_str = os.environ.get('SPOTIFLAC_ARGS', '')
               args_list = args_str.split() if args_str else []
-
               timestamp = os.environ.get('TIMESTAMP')
               if not timestamp:
                   timestamp = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
-
               output_base = f"downloads/{timestamp}"
               os.makedirs(output_base, exist_ok=True)
-
               folder_urls = []
               errors = []
-
               for url in links.splitlines():
                   url = url.strip()
                   if not url:
@@ -268,10 +290,8 @@ jobs:
                   folder = os.path.join(output_base, safe)
                   os.makedirs(folder, exist_ok=True)
                   folder_urls.append((folder, url))
-
                   if not download_with_retry(url, folder, args_list):
                       errors.append(url)
-
               with open('/tmp/folder_urls.txt', 'w') as f:
                   for folder, url in folder_urls:
                       f.write(f"FOLDER={folder} URL={url}\n")
@@ -280,9 +300,7 @@ jobs:
                       f.write(f"FAIL:{url}\n")
               with open('/tmp/timestamp.txt', 'w') as f:
                   f.write(timestamp)
-
               print(f"Processed {len(folder_urls)} links, {len(errors)} failures.")
-
           if __name__ == '__main__':
               main()
           PYEOF
@@ -298,29 +316,6 @@ jobs:
           python3 /tmp/spotiflac_download.py
           TS=$(cat /tmp/timestamp.txt)
           echo "timestamp=$TS" >> $GITHUB_OUTPUT
-
-      # ========== GENERATE METADATA BEFORE STRUCTURE CHANGES ==========
-      - name: Generate per-download metadata
-        run: |
-          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
-          OUTPUT_BASE="downloads/$TIMESTAMP"
-          mkdir -p "history/$TIMESTAMP"
-          while IFS=' ' read -r FOLDER URL; do
-            [ ! -d "$FOLDER" ] && continue
-            FOLDER_NAME=$(basename "$FOLDER")
-            MANIFEST="history/$TIMESTAMP/${FOLDER_NAME}.json"
-            echo "{\"timestamp\":\"$TIMESTAMP\",\"folder\":\"$FOLDER_NAME\",\"url\":\"$URL\",\"provider_mode\":\"${{ github.event.inputs.provider_mode }}\",\"quality\":\"${{ github.event.inputs.quality }}\",\"files\":[" > "$MANIFEST"
-            FIRST=true
-            find "$FOLDER" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
-              REL="${f#$FOLDER/}"
-              SZ=$(stat -c%s "$f")
-              HS=$(sha256sum "$f" | cut -d' ' -f1)
-              [ "$FIRST" = false ] && echo "," >> "$MANIFEST"
-              FIRST=false
-              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
-            done
-            echo "]}" >> "$MANIFEST"
-          done < /tmp/folder_urls.txt
 
       # ========== APPLY STRUCTURE MODE ==========
       - name: Apply structure mode (flat/preserve/archive)
@@ -346,6 +341,41 @@ jobs:
             done
           fi
 
+      # ========== OPTIONAL AUDIO CONVERSION ==========
+      - name: Convert audio files (if enabled)
+        if: github.event.inputs.enable_conversion == 'true'
+        run: |
+          TARGET="${{ github.event.inputs.target_format }}"
+          BITRATE="${{ github.event.inputs.audio_bitrate }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
+          BASE="downloads/$TIMESTAMP"
+          echo "Converting audio files to .$TARGET (bitrate $BITRATE)"
+          # Supported input extensions
+          find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) | while read -r f; do
+            out="${f%.*}.$TARGET"
+            if [ "$TARGET" = "m4a" ]; then
+              # AAC in M4A container
+              ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+            elif [ "$TARGET" = "mp3" ]; then
+              ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+            elif [ "$TARGET" = "ogg" ]; then
+              ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+            elif [ "$TARGET" = "opus" ]; then
+              ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+            elif [ "$TARGET" = "wav" ]; then
+              ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -y "$out" 2>/dev/null
+            else
+              echo "Unknown target format: $TARGET, skipping $f"
+              continue
+            fi
+            if [ -f "$out" ]; then
+              echo "Converted: $(basename "$f") -> $(basename "$out")"
+              rm "$f"
+            else
+              echo "Conversion failed for $f"
+            fi
+          done
+
       # ========== SPLIT LARGE FILES (>95MB) FOR GIT ==========
       - name: Split large files
         if: github.event.inputs.storage_mode != 'artifact'
@@ -359,7 +389,30 @@ jobs:
             fi
           done
 
-      # ========== GENERATE FAILURE REPORT ==========
+      # ========== GENERATE METADATA (NOW AFTER CONVERSION/SPLIT) ==========
+      - name: Generate per-download metadata
+        run: |
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
+          OUTPUT_BASE="downloads/$TIMESTAMP"
+          mkdir -p "history/$TIMESTAMP"
+          while IFS=' ' read -r FOLDER URL; do
+            [ ! -d "$FOLDER" ] && continue
+            FOLDER_NAME=$(basename "$FOLDER")
+            MANIFEST="history/$TIMESTAMP/${FOLDER_NAME}.json"
+            echo "{\"timestamp\":\"$TIMESTAMP\",\"folder\":\"$FOLDER_NAME\",\"url\":\"$URL\",\"provider_mode\":\"${{ github.event.inputs.provider_mode }}\",\"quality\":\"${{ github.event.inputs.quality }}\",\"files\":[" > "$MANIFEST"
+            FIRST=true
+            find "$FOLDER" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+              REL="${f#$FOLDER/}"
+              SZ=$(stat -c%s "$f")
+              HS=$(sha256sum "$f" | cut -d' ' -f1)
+              [ "$FIRST" = false ] && echo "," >> "$MANIFEST"
+              FIRST=false
+              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
+            done
+            echo "]}" >> "$MANIFEST"
+          done < /tmp/folder_urls.txt
+
+      # ========== FAILURE REPORT ==========
       - name: Generate failure report
         run: |
           TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
@@ -373,7 +426,7 @@ jobs:
           $(if [ -s /tmp/errors.log ]; then cat /tmp/errors.log | sed 's/^FAIL://' | sed 's/^/- `/; s/$/`/'; else echo "✅ No failures."; fi)
           EOF
 
-      # ========== CREATE HISTORY UPDATE SCRIPT (DownLord style) ==========
+      # ========== DOWNLOAD HISTORY UPDATE (unchanged) ==========
       - name: Create history update script
         run: |
           cat > /tmp/update_history.py << 'PYEOF'
@@ -411,7 +464,7 @@ jobs:
           def file_emoji(fname):
               ext = fname.lower().split('.')[-1] if '.' in fname else ''
               emoji_map = {
-                  'mp3': '🎵', 'flac': '🎵', 'wav': '🎵', 'm4a': '🎵',
+                  'mp3': '🎵', 'flac': '🎵', 'wav': '🎵', 'm4a': '🎵', 'ogg': '🎵', 'opus': '🎵',
                   'jpg': '🖼️', 'png': '🖼️', 'json': '📄', 'txt': '📄',
                   'zip': '🗜️', '7z': '🗜️'
               }
@@ -490,7 +543,6 @@ jobs:
               total_session_size += sum(fi['size'] for fi in data['files'])
               total_session_count += 1
 
-          # Update history/README.md
           readme_path = "history/README.md"
           total_size = total_session_size
           total_count = total_session_count
@@ -518,7 +570,6 @@ jobs:
           with open(readme_path, 'w') as f:
               f.write(new_content)
 
-          # INDEX.md
           index_lines = ["# Content Index", "", "| Folder | Files | Git Command |", "|--------|-------|-------------|"]
           for root, dirs, files in os.walk("history"):
               for mf in files:
@@ -533,13 +584,11 @@ jobs:
           with open('INDEX.md', 'w') as f:
               f.write("\n".join(index_lines) + "\n")
 
-          # Badge SVG
           size_gb = total_size / 1073741824
           badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">🎵 {size_gb:.1f} GB | 📂 {total_count} downloads</text></svg>'
           with open('history/badge.svg', 'w') as f:
               f.write(badge_svg)
 
-          # BOOTSTRAP.md
           if not os.path.exists('BOOTSTRAP.md'):
               with open('BOOTSTRAP.md', 'w') as f:
                   f.write(f"""# Git-Only Access
@@ -568,7 +617,6 @@ jobs:
           ```
           """)
 
-          # .trigger.template
           if not os.path.exists('.trigger.template'):
               with open('.trigger.template', 'w') as f:
                   f.write("""# SpotiFLAC Trigger
@@ -593,14 +641,13 @@ jobs:
           QUALITY: ${{ github.event.inputs.quality }}
           STRUCTURE_MODE: ${{ github.event.inputs.structure_mode }}
 
-      # ========== COMMIT AND PUSH ==========
+      # ========== COMMIT / UPLOAD ==========
       - name: Commit and push to main
         if: github.event.inputs.storage_mode == 'main'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "SpotiFLAC Bot"
           TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
-          # Disable sparse-checkout to add root-level files
           git sparse-checkout disable
           BATCH_SIZE=0
           BATCH_NUM=1
@@ -626,7 +673,6 @@ jobs:
             git pull --rebase origin ${{ github.ref_name }} || true
             git push
           fi
-          # Add root-level files (now allowed after sparse-checkout disable)
           git add history/$TIMESTAMP/ INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg
           git diff --cached --quiet || git commit -m "Update history for $TIMESTAMP" && git push
 
