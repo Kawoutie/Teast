@@ -384,54 +384,67 @@ jobs:
           TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BASE="downloads/$TIMESTAMP"
           echo "Converting audio files to .$TARGET (bitrate $BITRATE)"
-          FILE_COUNT=$(find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) | wc -l)
+
+          # Check ffmpeg availability
+          if ! command -v ffmpeg &> /dev/null; then
+            echo "ERROR: ffmpeg not found."
+            exit 1
+          fi
+
+          # Count files to convert (using -print0 safe for special characters)
+          FILE_COUNT=$(find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) -print0 | xargs -0 -n1 | wc -l)
           if [ "$FILE_COUNT" -eq 0 ]; then
             echo "No audio files found to convert. Skipping."
             exit 0
           fi
           echo "Found $FILE_COUNT audio file(s) to convert."
-          CONVERT_FAILED=0
-          find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) | while read -r f; do
+
+          FAILED=0
+          # Process each file safely
+          find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) -print0 | while IFS= read -r -d '' f; do
             out="${f%.*}.$TARGET"
             if [ -f "$out" ]; then
               echo "Output already exists: $(basename "$out") – skipping conversion for $(basename "$f")"
               continue
             fi
             echo "Converting: $(basename "$f") → $(basename "$out")"
+
+            # Run ffmpeg with full output (no redirection) and -nostdin
             case "$TARGET" in
               m4a)
-                ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
                 ;;
               mp3)
-                ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
                 ;;
               ogg)
-                ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
                 ;;
               opus)
-                ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
                 ;;
               wav)
-                ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -y "$out" 2>/dev/null
+                ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -nostdin -y "$out"
                 ;;
               *)
                 echo "Unknown target format: $TARGET"
                 exit 1
                 ;;
             esac
-            if [ -f "$out" ]; then
+
+            if [ $? -eq 0 ] && [ -f "$out" ]; then
               echo "✅ Converted: $(basename "$f") -> $(basename "$out")"
-              rm "$f"
+              rm -f "$f"
             else
               echo "❌ Conversion failed for: $(basename "$f")"
-              CONVERT_FAILED=1
+              FAILED=1
             fi
           done
-          if [ "$CONVERT_FAILED" -eq 1 ]; then
+
+          if [ "$FAILED" -eq 1 ]; then
             echo "⚠️ Some conversions failed, but continuing workflow."
           fi
           echo "Conversion step finished."
-
       # ========== GENERATE METADATA (NOW AFTER CONVERSION/SPLIT) ==========
       - name: Generate per-download metadata
         run: |
@@ -743,3 +756,4 @@ jobs:
           name: spotiflac-${{ steps.spotify_download.outputs.timestamp }}
           path: downloads/${{ steps.spotify_download.outputs.timestamp }}/
           retention-days: 90
+          
