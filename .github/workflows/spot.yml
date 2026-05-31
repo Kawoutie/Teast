@@ -1,0 +1,650 @@
+name: SpotiFLAC Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      spotify_links:
+        description: 'Spotify URLs (track, album, playlist) – one per line'
+        required: true
+        type: string
+      storage_mode:
+        description: 'Storage mode'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - branch
+          - artifact
+      provider_mode:
+        description: 'Provider selection (default: lossless)'
+        required: false
+        default: 'lossless'
+        type: choice
+        options:
+          - auto
+          - lossless
+          - all
+          - specific
+      specific_provider:
+        description: 'Specific provider (if provider_mode = specific)'
+        required: false
+        type: choice
+        options:
+          - tidal
+          - qobuz
+          - deezer
+          - amazon
+          - apple
+          - soundcloud
+          - youtube
+          - pandora
+      quality:
+        description: 'Audio quality'
+        required: false
+        default: 'HI_RES_LOSSLESS'
+        type: choice
+        options:
+          - HI_RES_LOSSLESS
+          - LOSSLESS
+          - HIGH
+          - MEDIUM
+          - LOW
+      enable_metadata:
+        description: 'Embed metadata (lyrics, MusicBrainz)'
+        required: false
+        default: true
+        type: boolean
+      artist_subfolders:
+        description: 'Create subfolders per artist'
+        required: false
+        default: false
+        type: boolean
+      filename_format:
+        description: 'Filename format (e.g., "{artist} - {title}")'
+        required: false
+        type: string
+        default: ''
+      structure_mode:
+        description: 'Output structure (flat/preserve/archive)'
+        required: false
+        default: 'flat'
+        type: choice
+        options:
+          - flat
+          - preserve
+          - archive
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            .github/
+            history/
+          sparse-checkout-cone-mode: false
+
+      # ========== DEPENDENCY MANAGEMENT (DownLord style, no aria2) ==========
+      - name: Install core tools (7-day apt cache)
+        run: |
+          if command -v 7z && command -v jq && command -v curl; then
+            if [ -f .github/.last_apt_update ]; then
+              DAYS=$(( ($(date +%s) - $(cat .github/.last_apt_update)) / 86400 ))
+              if [ $DAYS -le 7 ]; then
+                echo "Core tools up-to-date ($DAYS days)."
+                exit 0
+              fi
+            fi
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full p7zip-rar curl jq python3 python3-requests
+          date +%s > .github/.last_apt_update
+
+      - name: Cache media tools (ffmpeg, yt-dlp)
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/yt-dlp
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
+          key: media-tools-${{ hashFiles('.github/.last_media_update') }}
+          restore-keys: |
+            media-tools-
+
+      - name: Install media tools (ffmpeg, yt-dlp) if needed
+        run: |
+          NEED_MEDIA=true
+          if command -v yt-dlp && command -v ffprobe; then
+            if [ -f .github/.last_media_update ]; then
+              DAYS=$(( ($(date +%s) - $(cat .github/.last_media_update)) / 86400 ))
+              if [ $DAYS -le 7 ]; then
+                echo "Media tools up-to-date."
+                NEED_MEDIA=false
+              fi
+            fi
+          fi
+          if [ "$NEED_MEDIA" = true ]; then
+            if ! command -v yt-dlp; then
+              curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+              chmod +x /usr/local/bin/yt-dlp
+            fi
+            if ! command -v ffmpeg; then
+              FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+              curl -sL "$FFMPEG_URL" -o /tmp/ffmpeg.tar.xz
+              tar xf /tmp/ffmpeg.tar.xz -C /tmp/
+              cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+              rm -rf /tmp/ffmpeg-master-latest-linux64-gpl /tmp/ffmpeg.tar.xz
+            fi
+            date +%s > .github/.last_media_update
+          fi
+
+      - name: Background yt-dlp update
+        run: |
+          ( command -v yt-dlp && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp.new && chmod +x /usr/local/bin/yt-dlp.new ) &
+
+      # ========== SPOTIFLAC SETUP ==========
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install SpotiFLAC
+        run: |
+          pip install --upgrade pip
+          pip install SpotiFLAC
+          python -c "from SpotiFLAC import SpotiFLAC; print('SpotiFLAC ready')"
+
+      - name: Prepare authentication
+        run: |
+          mkdir -p ~/.spotiflac
+          if [ -n "${{ secrets.TIDAL_TOKEN }}" ]; then
+            echo "tidal_token = '${{ secrets.TIDAL_TOKEN }}'" > ~/.spotiflac/auth.conf
+          fi
+          if [ -n "${{ secrets.QOBUZ_TOKEN }}" ]; then
+            echo "qobuz_token = '${{ secrets.QOBUZ_TOKEN }}'" >> ~/.spotiflac/auth.conf
+          fi
+          if [ -n "${{ secrets.DEEZER_ARL }}" ]; then
+            echo "deezer_arl = '${{ secrets.DEEZER_ARL }}'" >> ~/.spotiflac/auth.conf
+          fi
+
+      - name: Build SpotiFLAC arguments
+        id: args
+        run: |
+          ARGS=""
+          PROVIDER_MODE="${{ github.event.inputs.provider_mode }}"
+          SPECIFIC="${{ github.event.inputs.specific_provider }}"
+          if [ "$PROVIDER_MODE" = "lossless" ]; then
+            ARGS="$ARGS --provider tidal --provider qobuz --provider deezer --provider amazon --provider apple"
+          elif [ "$PROVIDER_MODE" = "all" ]; then
+            ARGS="$ARGS --provider tidal --provider qobuz --provider deezer --provider amazon --provider apple --provider soundcloud --provider youtube --provider pandora"
+          elif [ "$PROVIDER_MODE" = "specific" ] && [ -n "$SPECIFIC" ]; then
+            ARGS="$ARGS --provider $SPECIFIC"
+          fi
+          ARGS="$ARGS --quality ${{ github.event.inputs.quality }}"
+          if [ "${{ github.event.inputs.enable_metadata }}" = "true" ]; then
+            ARGS="$ARGS --metadata"
+          fi
+          if [ "${{ github.event.inputs.artist_subfolders }}" = "true" ]; then
+            ARGS="$ARGS --use-artist-subfolders"
+          fi
+          FMT="${{ github.event.inputs.filename_format }}"
+          if [ -n "$FMT" ]; then
+            ARGS="$ARGS --filename-format \"$FMT\""
+          fi
+          echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
+
+      # ========== CREATE DOWNLOAD SCRIPT (like DownLord's yt_api.py) ==========
+      - name: Create download script
+        run: |
+          cat > /tmp/spotiflac_download.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import os, sys, shlex, time, hashlib
+          from SpotiFLAC import SpotiFLAC
+
+          def download_with_retry(url, outdir, args_list, max_retries=3, delay=5):
+              for attempt in range(1, max_retries + 1):
+                  print(f"Attempt {attempt} for {url}")
+                  try:
+                      clean_args = [x for x in args_list if x != '--output-dir']
+                      clean_args.extend(['--output-dir', outdir, url])
+                      SpotiFLAC(*clean_args)
+                      print(f"SUCCESS:{url}")
+                      return True
+                  except Exception as e:
+                      print(f"Attempt {attempt} failed: {e}", file=sys.stderr)
+                      if attempt < max_retries:
+                          time.sleep(delay)
+                      else:
+                          print(f"FAIL:{url}", file=sys.stderr)
+                          return False
+              return False
+
+          def main():
+              links = os.environ.get('SPOTIFY_LINKS', '')
+              if not links:
+                  print("No links provided", file=sys.stderr)
+                  sys.exit(1)
+
+              args_str = os.environ.get('SPOTIFLAC_ARGS', '')
+              args_list = shlex.split(args_str) if args_str else []
+
+              timestamp = os.environ.get('TIMESTAMP')
+              if not timestamp:
+                  timestamp = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
+
+              output_base = f"downloads/{timestamp}"
+              os.makedirs(output_base, exist_ok=True)
+
+              folder_urls = []
+              errors = []
+
+              for url in links.splitlines():
+                  url = url.strip()
+                  if not url:
+                      continue
+                  # Sanitize folder name
+                  if '/track/' in url:
+                      safe = url.split('/')[-1]
+                  elif '/album/' in url:
+                      safe = url.split('/')[-1]
+                  elif '/playlist/' in url:
+                      safe = url.split('/')[-1]
+                  else:
+                      safe = hashlib.sha256(url.encode()).hexdigest()[:8]
+                  folder = os.path.join(output_base, safe)
+                  os.makedirs(folder, exist_ok=True)
+                  folder_urls.append((folder, url))
+
+                  if not download_with_retry(url, folder, args_list):
+                      errors.append(url)
+
+              with open('/tmp/folder_urls.txt', 'w') as f:
+                  for folder, url in folder_urls:
+                      f.write(f"FOLDER={folder} URL={url}\n")
+              with open('/tmp/errors.log', 'w') as f:
+                  for url in errors:
+                      f.write(f"FAIL:{url}\n")
+              with open('/tmp/timestamp.txt', 'w') as f:
+                  f.write(timestamp)
+
+              print(f"Processed {len(folder_urls)} links, {len(errors)} failures.")
+              # Write output for GitHub Actions
+              print(f"::set-output name=timestamp::{timestamp}")
+
+          if __name__ == '__main__':
+              main()
+          PYEOF
+          chmod +x /tmp/spotiflac_download.py
+
+      - name: Run download script
+        id: download
+        run: |
+          export SPOTIFY_LINKS="${{ github.event.inputs.spotify_links }}"
+          export SPOTIFLAC_ARGS="${{ steps.args.outputs.ARGS }}"
+          TIMESTAMP=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
+          export TIMESTAMP
+          python3 /tmp/spotiflac_download.py
+          # Read timestamp from file
+          TS=$(cat /tmp/timestamp.txt)
+          echo "timestamp=$TS" >> $GITHUB_OUTPUT
+
+      # ========== GENERATE METADATA BEFORE STRUCTURE CHANGES ==========
+      - name: Generate per-download metadata
+        run: |
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          OUTPUT_BASE="downloads/$TIMESTAMP"
+          mkdir -p "history/$TIMESTAMP"
+          while IFS=' ' read -r FOLDER URL; do
+            [ ! -d "$FOLDER" ] && continue
+            FOLDER_NAME=$(basename "$FOLDER")
+            MANIFEST="history/$TIMESTAMP/${FOLDER_NAME}.json"
+            echo "{\"timestamp\":\"$TIMESTAMP\",\"folder\":\"$FOLDER_NAME\",\"url\":\"$URL\",\"provider_mode\":\"${{ github.event.inputs.provider_mode }}\",\"quality\":\"${{ github.event.inputs.quality }}\",\"files\":[" > "$MANIFEST"
+            FIRST=true
+            find "$FOLDER" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+              REL="${f#$FOLDER/}"
+              SZ=$(stat -c%s "$f")
+              HS=$(sha256sum "$f" | cut -d' ' -f1)
+              [ "$FIRST" = false ] && echo "," >> "$MANIFEST"
+              FIRST=false
+              echo "{\"path\":\"$REL\",\"size\":$SZ,\"sha256\":\"$HS\"}" >> "$MANIFEST"
+            done
+            echo "]}" >> "$MANIFEST"
+          done < /tmp/folder_urls.txt
+
+      # ========== APPLY STRUCTURE MODE ==========
+      - name: Apply structure mode (flat/preserve/archive)
+        run: |
+          MODE="${{ github.event.inputs.structure_mode }}"
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          BASE="downloads/$TIMESTAMP"
+          if [ "$MODE" = "archive" ]; then
+            for D in "$BASE"/*/; do
+              [ -d "$D" ] || continue
+              FILE_COUNT=$(find "$D" -type f | wc -l)
+              if [ $FILE_COUNT -gt 0 ]; then
+                (cd "$BASE" && 7z a -tzip -mx0 "${D%/}.zip" "$(basename "$D")" && rm -rf "$D") &
+              fi
+            done
+            wait
+          elif [ "$MODE" = "flat" ]; then
+            for D in "$BASE"/*/; do
+              if [ -d "$D" ]; then
+                find "$D" -type f -exec mv {} "$BASE/" \;
+                rm -rf "$D"
+              fi
+            done
+          fi
+
+      # ========== SPLIT LARGE FILES (>95MB) FOR GIT ==========
+      - name: Split large files
+        if: github.event.inputs.storage_mode != 'artifact'
+        run: |
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          BASE="downloads/$TIMESTAMP"
+          find "$BASE" -type f ! -name "*.7z.*" -print0 | while IFS= read -r -d '' f; do
+            SIZE=$(stat -c%s "$f" 2>/dev/null)
+            if [ "$SIZE" -gt $((95*1048576)) ]; then
+              7z a -v95m -mx0 "$f.7z" "$f" && rm "$f"
+            fi
+          done
+
+      # ========== GENERATE FAILURE REPORT ==========
+      - name: Generate failure report
+        run: |
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          mkdir -p "history/$TIMESTAMP"
+          cat > "history/$TIMESTAMP/failure_report.md" << EOF
+          # ❌ SpotiFLAC Failure Report
+          **Date:** $(TZ='Asia/Tehran' date '+%Y-%m-%d %H:%M:%S')
+          **Provider mode:** ${{ github.event.inputs.provider_mode }}
+          **Quality:** ${{ github.event.inputs.quality }}
+          ## Failed URLs
+          $(if [ -s /tmp/errors.log ]; then cat /tmp/errors.log | sed 's/^FAIL://' | sed 's/^/- `/; s/$/`/'; else echo "✅ No failures."; fi)
+          EOF
+
+      # ========== CREATE HISTORY UPDATE SCRIPT (like DownLord's update_history.py) ==========
+      - name: Create history update script
+        run: |
+          cat > /tmp/update_history.py << 'PYEOF'
+          import json, os, re, glob
+          from collections import defaultdict
+
+          ts = os.environ['TS']
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          provider = os.environ['PROVIDER_MODE']
+          quality = os.environ['QUALITY']
+          structure = os.environ['STRUCTURE_MODE']
+
+          failures = set()
+          if os.path.exists('/tmp/errors.log'):
+              with open('/tmp/errors.log') as f:
+                  for line in f:
+                      if line.startswith('FAIL:'):
+                          failures.add(line.strip().split(':',1)[1].strip())
+
+          folder_status = {}
+          if os.path.exists('/tmp/folder_urls.txt'):
+              with open('/tmp/folder_urls.txt') as f:
+                  for line in f:
+                      parts = line.strip().split(' ', 1)
+                      folder = None; url = None
+                      for part in parts:
+                          if part.startswith('FOLDER='):
+                              folder = part.split('=',1)[1]
+                          elif part.startswith('URL='):
+                              url = part.split('=',1)[1]
+                      if folder and url:
+                          folder_status[folder] = 'failed' if url in failures else 'success'
+
+          def file_emoji(fname):
+              ext = fname.lower().split('.')[-1] if '.' in fname else ''
+              emoji_map = {
+                  'mp3': '🎵', 'flac': '🎵', 'wav': '🎵', 'm4a': '🎵',
+                  'jpg': '🖼️', 'png': '🖼️', 'json': '📄', 'txt': '📄',
+                  'zip': '🗜️', '7z': '🗜️'
+              }
+              return emoji_map.get(ext, '📄')
+
+          new_entries = []
+          total_session_size = 0
+          total_session_count = 0
+          manifest_pattern = f"history/{ts}/*.json"
+          for manifest_path in sorted(glob.glob(manifest_pattern)):
+              with open(manifest_path) as f:
+                  data = json.load(f)
+              folder = data['folder']
+              dd = f"downloads/{ts}/{folder}" if os.path.exists(f"downloads/{ts}/{folder}") else f"downloads/{ts}"
+              if not os.path.exists(dd):
+                  dd = f"downloads/{ts}"
+              status = folder_status.get(f"downloads/{ts}/{folder}", 'success')
+              icon = '🔴' if status == 'failed' else '🟢'
+
+              normal = []
+              splits = defaultdict(list)
+              for fi in data['files']:
+                  p = fi['path']
+                  mt = re.match(r'(.+)\.7z\.(\d{3})$', p)
+                  if mt:
+                      splits[mt.group(1)].append(fi)
+                  else:
+                      normal.append(fi)
+
+              rows = []
+              for fi in normal:
+                  raw = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{fi['path']}"
+                  rows.append((file_emoji(fi['path']), fi['path'], fi['size'], raw, False, 0))
+              for base, parts in sorted(splits.items()):
+                  parts.sort(key=lambda x: x['path'])
+                  total_part_size = sum(p['size'] for p in parts)
+                  raw_first = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{parts[0]['path']}"
+                  rows.append(('📦', f"{base}.7z ({len(parts)} parts)", total_part_size, raw_first, True, len(parts)))
+                  for i, p in enumerate(parts):
+                      raw_p = f"https://raw.githubusercontent.com/{repo}/{branch}/{dd}/{p['path']}"
+                      prefix = '&nbsp;&nbsp;&nbsp;&nbsp;├─' if i < len(parts)-1 else '&nbsp;&nbsp;&nbsp;&nbsp;└─'
+                      rows.append(('', f"{prefix} {p['path']}", p['size'], raw_p, False, 0))
+
+              entry_lines = []
+              entry_lines.append(f"## {icon} {folder} — {sum(fi['size'] for fi in data['files'])} bytes — {ts}")
+              entry_lines.append(f"**Provider:** {provider} | **Quality:** {quality} | **Structure:** {structure}")
+              entry_lines.append("")
+              entry_lines.append("| File | Size | Download |")
+              entry_lines.append("|------|------|----------|")
+              for emoji, name, size, url, is_group, part_count in rows:
+                  size_str = f"{size/1048576:.0f} MB" if size >= 1048576 else f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
+                  display_name = f"{emoji} {name}" if emoji and not name.startswith('&nbsp') else name
+                  download_link = f"[⬇]({url})" if url else ""
+                  entry_lines.append(f"| {display_name} | {size_str} | {download_link} |")
+              entry_lines.append("")
+              script_path = f"{dd}/download.sh"
+              os.makedirs(os.path.dirname(script_path), exist_ok=True)
+              with open(script_path, 'w') as sh:
+                  sh.write(f"""#!/bin/bash
+          REPO="https://github.com/{repo}.git"
+          BRANCH="{branch}"
+          FOLDER="{dd}"
+          git clone --depth 1 --filter=blob:none --no-checkout "$REPO" tmp
+          cd tmp
+          git sparse-checkout init --cone
+          git sparse-checkout set "$FOLDER"
+          git checkout
+          echo "Done: tmp/$FOLDER"
+          """)
+              os.chmod(script_path, 0o755)
+              entry_lines.append(f"💾 [Git download script](https://raw.githubusercontent.com/{repo}/{branch}/{dd}/download.sh)")
+              entry_lines.append("")
+              entry_lines.append("---")
+              new_entries.append("\n".join(entry_lines))
+
+              total_session_size += sum(fi['size'] for fi in data['files'])
+              total_session_count += 1
+
+          # Update history/README.md
+          readme_path = "history/README.md"
+          total_size = total_session_size
+          total_count = total_session_count
+          for root, dirs, files in os.walk("history"):
+              for mf in files:
+                  if mf.endswith('.json') and os.path.dirname(os.path.join(root, mf)) != f"history/{ts}":
+                      try:
+                          with open(os.path.join(root, mf)) as f:
+                              old_data = json.load(f)
+                          total_size += sum(fi['size'] for fi in old_data['files'])
+                          total_count += 1
+                      except: pass
+
+          header = f"# 📥 SpotiFLAC Download History\n**Total Size:** {total_size/1073741824:.1f} GB | **Downloads:** {total_count}\n\n---\n\n"
+          if os.path.exists(readme_path):
+              with open(readme_path) as f:
+                  existing = f.read()
+              if "---" in existing:
+                  parts = existing.split("---\n", 1)
+                  new_content = parts[0] + "---\n\n" + "\n".join(new_entries) + "\n" + parts[1]
+              else:
+                  new_content = header + "\n".join(new_entries)
+          else:
+              new_content = header + "\n".join(new_entries)
+          with open(readme_path, 'w') as f:
+              f.write(new_content)
+
+          # INDEX.md
+          index_lines = ["# Content Index", "", "| Folder | Files | Git Command |", "|--------|-------|-------------|"]
+          for root, dirs, files in os.walk("history"):
+              for mf in files:
+                  if mf.endswith('.json'):
+                      with open(os.path.join(root, mf)) as f:
+                          data = json.load(f)
+                      folder = data['folder']
+                      dd = f"downloads/{ts}/{folder}" if os.path.exists(f"downloads/{ts}/{folder}") else f"downloads/{ts}"
+                      fcount = len(data['files'])
+                      git_cmd = f"`git sparse-checkout add {dd}/ && git checkout`"
+                      index_lines.append(f"| {folder} | {fcount} | {git_cmd} |")
+          with open('INDEX.md', 'w') as f:
+              f.write("\n".join(index_lines) + "\n")
+
+          # Badge SVG
+          size_gb = total_size / 1073741824
+          badge_svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="40"><rect width="320" height="40" fill="#1a1a2e" rx="6"/><text x="15" y="25" fill="#e0e0e0" font-size="13" font-family="monospace">🎵 {size_gb:.1f} GB | 📂 {total_count} downloads</text></svg>'
+          with open('history/badge.svg', 'w') as f:
+              f.write(badge_svg)
+
+          # BOOTSTRAP.md
+          if not os.path.exists('BOOTSTRAP.md'):
+              with open('BOOTSTRAP.md', 'w') as f:
+                  f.write(f"""# Git-Only Access
+
+          If raw.githubusercontent.com is blocked, use git.
+
+          ## Browse history
+          ```bash
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/{repo}.git
+          cd {repo.split('/')[1]}
+          git sparse-checkout init --cone
+          git sparse-checkout set history/ BOOTSTRAP.md INDEX.md
+          git checkout
+          cat history/README.md
+          ```
+
+          ## Download a folder
+          ```bash
+          git sparse-checkout add downloads/FOLDER_NAME/
+          git checkout
+          ```
+
+          ## Use the download script
+          ```bash
+          bash downloads/FOLDER_NAME/download.sh
+          ```
+          """)
+
+          # .trigger.template
+          if not os.path.exists('.trigger.template'):
+              with open('.trigger.template', 'w') as f:
+                  f.write("""# SpotiFLAC Trigger
+          # Copy to .trigger, add links, push
+          spotify_links=https://open.spotify.com/track/...
+          provider_mode=lossless
+          quality=HI_RES_LOSSLESS
+          structure_mode=flat
+          """)
+          print("History and indexes updated.")
+          PYEOF
+          chmod +x /tmp/update_history.py
+
+      - name: Run history update script
+        if: github.event.inputs.storage_mode != 'artifact'
+        run: python3 /tmp/update_history.py
+        env:
+          TS: ${{ steps.download.outputs.timestamp }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          PROVIDER_MODE: ${{ github.event.inputs.provider_mode }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          STRUCTURE_MODE: ${{ github.event.inputs.structure_mode }}
+
+      # ========== COMMIT AND PUSH ==========
+      - name: Commit and push to main
+        if: github.event.inputs.storage_mode == 'main'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "SpotiFLAC Bot"
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          BATCH_SIZE=0
+          BATCH_NUM=1
+          > /tmp/batch_files.txt
+          find "downloads/$TIMESTAMP" -type f -print0 | while IFS= read -r -d '' f; do
+            SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            echo "$f" >> /tmp/batch_files.txt
+            BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
+            if [ $BATCH_SIZE -ge 1000 ]; then
+              echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
+              while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
+              git commit -m "SpotiFLAC $TIMESTAMP (batch $BATCH_NUM)" || true
+              git pull --rebase origin ${{ github.ref_name }} || true
+              git push
+              BATCH_NUM=$((BATCH_NUM + 1))
+              BATCH_SIZE=0
+              > /tmp/batch_files.txt
+            fi
+          done
+          if [ -s /tmp/batch_files.txt ]; then
+            while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
+            git commit -m "SpotiFLAC $TIMESTAMP (final)" || true
+            git pull --rebase origin ${{ github.ref_name }} || true
+            git push
+          fi
+          git add history/$TIMESTAMP/ INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg
+          git diff --cached --quiet || git commit -m "Update history for $TIMESTAMP" && git push
+
+      - name: Push to orphan branch
+        if: github.event.inputs.storage_mode == 'branch'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "SpotiFLAC Bot"
+          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          BRANCH="spotiflac-$TIMESTAMP"
+          git checkout --orphan "$BRANCH"
+          git reset --hard
+          mv "downloads/$TIMESTAMP"/* .
+          mkdir -p history && mv "history/$TIMESTAMP" history/ 2>/dev/null || true
+          cp INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg . 2>/dev/null || true
+          git add .
+          git commit -m "SpotiFLAC download $TIMESTAMP"
+          git push -u origin "$BRANCH"
+
+      - name: Upload artifact
+        if: github.event.inputs.storage_mode == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotiflac-${{ steps.download.outputs.timestamp }}
+          path: downloads/${{ steps.download.outputs.timestamp }}/
+          retention-days: 90
