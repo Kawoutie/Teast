@@ -724,7 +724,7 @@ jobs:
             git push
           fi
           git diff --cached --quiet || { git commit -m "History update $TS" && git push; }
-
+          
       - name: Commit and push (branch mode)
         if: env.STORAGE_MODE == 'branch'
         run: |
@@ -736,22 +736,23 @@ jobs:
           BATCH_SIZE=0
           BATCH_NUM=1
           > /tmp/batch_files.txt
-          for D in downloads/${TS}_*; do
-            [ -d "$D" ] || continue
-            find "$D" -type f -print0 | while IFS= read -r -d '' f; do
-              SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
-              echo "$f" >> /tmp/batch_files.txt
-              BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
-              if [ $BATCH_SIZE -ge 1000 ]; then
-                echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
-                while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
-                git commit -m "Download $TS (batch $BATCH_NUM)" || true
-                BATCH_NUM=$((BATCH_NUM + 1))
-                BATCH_SIZE=0
-                > /tmp/batch_files.txt
-              fi
-            done
-          done
+          # Write file list to a temp file first (no subshell)
+          find downloads/${TS}_* -type f > /tmp/all_files.txt 2>/dev/null || true
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            echo "$f" >> /tmp/batch_files.txt
+            BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
+            if [ $BATCH_SIZE -ge 1000 ]; then
+              echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
+              while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
+              git commit -m "Download $TS (batch $BATCH_NUM)" || true
+              BATCH_NUM=$((BATCH_NUM + 1))
+              BATCH_SIZE=0
+              > /tmp/batch_files.txt
+            fi
+          done < /tmp/all_files.txt
+          # Final batch
           if [ -s /tmp/batch_files.txt ]; then
             while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
             git commit -m "Download $TS (final)" || true
