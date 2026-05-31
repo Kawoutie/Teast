@@ -50,11 +50,6 @@ on:
           - HIGH
           - MEDIUM
           - LOW
-      enable_metadata:
-        description: 'Embed metadata (lyrics, MusicBrainz)'
-        required: false
-        default: true
-        type: boolean
       artist_subfolders:
         description: 'Create subfolders per artist'
         required: false
@@ -155,7 +150,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          # No cache to avoid missing requirements file error
 
       - name: Install SpotiFLAC
         run: |
@@ -183,16 +177,14 @@ jobs:
           PROVIDER_MODE="${{ github.event.inputs.provider_mode }}"
           SPECIFIC="${{ github.event.inputs.specific_provider }}"
           if [ "$PROVIDER_MODE" = "lossless" ]; then
-            ARGS="$ARGS --provider tidal --provider qobuz --provider deezer --provider amazon --provider apple"
+            ARGS="$ARGS --service tidal qobuz deezer amazon apple"
           elif [ "$PROVIDER_MODE" = "all" ]; then
-            ARGS="$ARGS --provider tidal --provider qobuz --provider deezer --provider amazon --provider apple --provider soundcloud --provider youtube --provider pandora"
+            ARGS="$ARGS --service tidal qobuz deezer amazon apple soundcloud youtube pandora"
           elif [ "$PROVIDER_MODE" = "specific" ] && [ -n "$SPECIFIC" ]; then
-            ARGS="$ARGS --provider $SPECIFIC"
+            ARGS="$ARGS --service $SPECIFIC"
           fi
+          # auto mode: no --service flag
           ARGS="$ARGS --quality ${{ github.event.inputs.quality }}"
-          if [ "${{ github.event.inputs.enable_metadata }}" = "true" ]; then
-            ARGS="$ARGS --metadata"
-          fi
           if [ "${{ github.event.inputs.artist_subfolders }}" = "true" ]; then
             ARGS="$ARGS --use-artist-subfolders"
           fi
@@ -202,7 +194,7 @@ jobs:
           fi
           echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
 
-      # ========== CREATE DOWNLOAD SCRIPT (like DownLord's yt_api.py) ==========
+      # ========== CREATE DOWNLOAD SCRIPT ==========
       - name: Create download script
         run: |
           cat > /tmp/spotiflac_download.py << 'PYEOF'
@@ -339,7 +331,6 @@ jobs:
               fi
             done
           fi
-          # preserve mode: do nothing
 
       # ========== SPLIT LARGE FILES (>95MB) FOR GIT ==========
       - name: Split large files
