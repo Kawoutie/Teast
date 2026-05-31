@@ -1,4 +1,4 @@
-name: SpotiFLAC
+name: SpotiFLAC Downloader
 
 on:
   workflow_dispatch:
@@ -80,7 +80,7 @@ permissions:
   actions: write
 
 jobs:
-  download:
+  download_job:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -92,7 +92,7 @@ jobs:
             history/
           sparse-checkout-cone-mode: false
 
-      # ========== DEPENDENCY MANAGEMENT ==========
+      # ========== DEPENDENCY MANAGEMENT (DownLord style, no aria2) ==========
       - name: Install core tools (7-day apt cache)
         run: |
           if command -v 7z && command -v jq && command -v curl; then
@@ -155,7 +155,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          # No cache parameter to avoid missing requirements file error
+          # No cache to avoid missing requirements file error
 
       - name: Install SpotiFLAC
         run: |
@@ -202,7 +202,7 @@ jobs:
           fi
           echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
 
-      # ========== CREATE DOWNLOAD SCRIPT ==========
+      # ========== CREATE DOWNLOAD SCRIPT (like DownLord's yt_api.py) ==========
       - name: Create download script
         run: |
           cat > /tmp/spotiflac_download.py << 'PYEOF'
@@ -276,9 +276,6 @@ jobs:
                   f.write(timestamp)
 
               print(f"Processed {len(folder_urls)} links, {len(errors)} failures.")
-              # GitHub Actions output
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
-                  gh.write(f"timestamp={timestamp}\n")
 
           if __name__ == '__main__':
               main()
@@ -286,33 +283,20 @@ jobs:
           chmod +x /tmp/spotiflac_download.py
 
       - name: Run download script
-        id: download
+        id: spotify_download
         run: |
           export SPOTIFY_LINKS="${{ github.event.inputs.spotify_links }}"
           export SPOTIFLAC_ARGS="${{ steps.args.outputs.ARGS }}"
           TIMESTAMP=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
           export TIMESTAMP
           python3 /tmp/spotiflac_download.py
-          # Output is already written to GITHUB_OUTPUT by the script; we can also read file
-          TS=$(cat /tmp/timestamp.txt)
-          echo "timestamp=$TS" >> $GITHUB_OUTPUT
-
-      - name: Run download script
-        id: download
-        run: |
-          export SPOTIFY_LINKS="${{ github.event.inputs.spotify_links }}"
-          export SPOTIFLAC_ARGS="${{ steps.args.outputs.ARGS }}"
-          TIMESTAMP=$(TZ='Asia/Tehran' date +%Y%m%d_%H%M%S)
-          export TIMESTAMP
-          python3 /tmp/spotiflac_download.py
-          # Read timestamp from file
           TS=$(cat /tmp/timestamp.txt)
           echo "timestamp=$TS" >> $GITHUB_OUTPUT
 
       # ========== GENERATE METADATA BEFORE STRUCTURE CHANGES ==========
       - name: Generate per-download metadata
         run: |
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           OUTPUT_BASE="downloads/$TIMESTAMP"
           mkdir -p "history/$TIMESTAMP"
           while IFS=' ' read -r FOLDER URL; do
@@ -336,7 +320,7 @@ jobs:
       - name: Apply structure mode (flat/preserve/archive)
         run: |
           MODE="${{ github.event.inputs.structure_mode }}"
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BASE="downloads/$TIMESTAMP"
           if [ "$MODE" = "archive" ]; then
             for D in "$BASE"/*/; do
@@ -355,12 +339,13 @@ jobs:
               fi
             done
           fi
+          # preserve mode: do nothing
 
       # ========== SPLIT LARGE FILES (>95MB) FOR GIT ==========
       - name: Split large files
         if: github.event.inputs.storage_mode != 'artifact'
         run: |
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BASE="downloads/$TIMESTAMP"
           find "$BASE" -type f ! -name "*.7z.*" -print0 | while IFS= read -r -d '' f; do
             SIZE=$(stat -c%s "$f" 2>/dev/null)
@@ -372,7 +357,7 @@ jobs:
       # ========== GENERATE FAILURE REPORT ==========
       - name: Generate failure report
         run: |
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           mkdir -p "history/$TIMESTAMP"
           cat > "history/$TIMESTAMP/failure_report.md" << EOF
           # ❌ SpotiFLAC Failure Report
@@ -383,7 +368,7 @@ jobs:
           $(if [ -s /tmp/errors.log ]; then cat /tmp/errors.log | sed 's/^FAIL://' | sed 's/^/- `/; s/$/`/'; else echo "✅ No failures."; fi)
           EOF
 
-      # ========== CREATE HISTORY UPDATE SCRIPT (like DownLord's update_history.py) ==========
+      # ========== CREATE HISTORY UPDATE SCRIPT ==========
       - name: Create history update script
         run: |
           cat > /tmp/update_history.py << 'PYEOF'
@@ -596,7 +581,7 @@ jobs:
         if: github.event.inputs.storage_mode != 'artifact'
         run: python3 /tmp/update_history.py
         env:
-          TS: ${{ steps.download.outputs.timestamp }}
+          TS: ${{ steps.spotify_download.outputs.timestamp }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           PROVIDER_MODE: ${{ github.event.inputs.provider_mode }}
@@ -609,7 +594,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "SpotiFLAC Bot"
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BATCH_SIZE=0
           BATCH_NUM=1
           > /tmp/batch_files.txt
@@ -642,7 +627,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "SpotiFLAC Bot"
-          TIMESTAMP="${{ steps.download.outputs.timestamp }}"
+          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BRANCH="spotiflac-$TIMESTAMP"
           git checkout --orphan "$BRANCH"
           git reset --hard
@@ -657,6 +642,6 @@ jobs:
         if: github.event.inputs.storage_mode == 'artifact'
         uses: actions/upload-artifact@v4
         with:
-          name: spotiflac-${{ steps.download.outputs.timestamp }}
-          path: downloads/${{ steps.download.outputs.timestamp }}/
+          name: spotiflac-${{ steps.spotify_download.outputs.timestamp }}
+          path: downloads/${{ steps.spotify_download.outputs.timestamp }}/
           retention-days: 90
