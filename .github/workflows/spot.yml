@@ -385,13 +385,12 @@ jobs:
           BASE="downloads/$TIMESTAMP"
           echo "Converting audio files to .$TARGET (bitrate $BITRATE)"
 
-          # Check ffmpeg availability
           if ! command -v ffmpeg &> /dev/null; then
             echo "ERROR: ffmpeg not found."
             exit 1
           fi
 
-          # Count files to convert (using -print0 safe for special characters)
+          # Count files safely
           FILE_COUNT=$(find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) -print0 | xargs -0 -n1 | wc -l)
           if [ "$FILE_COUNT" -eq 0 ]; then
             echo "No audio files found to convert. Skipping."
@@ -400,7 +399,6 @@ jobs:
           echo "Found $FILE_COUNT audio file(s) to convert."
 
           FAILED=0
-          # Process each file safely
           find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) -print0 | while IFS= read -r -d '' f; do
             out="${f%.*}.$TARGET"
             if [ -f "$out" ]; then
@@ -409,22 +407,22 @@ jobs:
             fi
             echo "Converting: $(basename "$f") → $(basename "$out")"
 
-            # Run ffmpeg with full output (no redirection) and -nostdin
+            # Use -vn to discard video streams (cover art) – prevents H.264 in audio container
             case "$TARGET" in
               m4a)
-                ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
+                ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -vn -map_metadata 0 -nostdin -y "$out"
                 ;;
               mp3)
-                ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
+                ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -vn -map_metadata 0 -nostdin -y "$out"
                 ;;
               ogg)
-                ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
+                ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -vn -map_metadata 0 -nostdin -y "$out"
                 ;;
               opus)
-                ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -nostdin -y "$out"
+                ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -vn -map_metadata 0 -nostdin -y "$out"
                 ;;
               wav)
-                ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -nostdin -y "$out"
+                ffmpeg -i "$f" -c:a pcm_s16le -vn -map_metadata 0 -nostdin -y "$out"
                 ;;
               *)
                 echo "Unknown target format: $TARGET"
@@ -432,7 +430,7 @@ jobs:
                 ;;
             esac
 
-            if [ $? -eq 0 ] && [ -f "$out" ]; then
+            if [ $? -eq 0 ] && [ -f "$out" ] && [ -s "$out" ]; then
               echo "✅ Converted: $(basename "$f") -> $(basename "$out")"
               rm -f "$f"
             else
