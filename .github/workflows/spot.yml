@@ -756,4 +756,3 @@ jobs:
           name: spotiflac-${{ steps.spotify_download.outputs.timestamp }}
           path: downloads/${{ steps.spotify_download.outputs.timestamp }}/
           retention-days: 90
-          
