@@ -18,7 +18,7 @@ git sparse-checkout add downloads/FOLDER_NAME/
 git checkout
 ```
 
-## Use a download script
+## Use the download script
 ```bash
 bash downloads/FOLDER_NAME/download.sh
 ```

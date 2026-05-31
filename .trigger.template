@@ -1,8 +1,6 @@
-# DownLord Trigger
+# SpotiFLAC Trigger
 # Copy to .trigger, add links, push
-links=https://example.com/file.zip
-storage_mode=main
-download_mode=download
-video_quality=best
-subtitle_mode=manual
+spotify_links=https://open.spotify.com/track/...
+provider_mode=lossless
+quality=HI_RES_LOSSLESS
 structure_mode=flat
