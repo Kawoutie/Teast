@@ -69,7 +69,7 @@ on:
           - flat
           - preserve
           - archive
-      # ----- NEW CONVERSION OPTIONS -----
+      # Conversion options (optional)
       enable_conversion:
         description: 'Convert downloaded files to another format'
         required: false
@@ -222,42 +222,63 @@ jobs:
           fi
           echo "ARGS=$ARGS" >> $GITHUB_OUTPUT
 
-      # ========== DOWNLOAD SCRIPT (with file‑count verification) ==========
+      # ========== DOWNLOAD SCRIPT WITH PROGRESS INDICATORS ==========
       - name: Create download script
         run: |
           cat > /tmp/spotiflac_download.py << 'PYEOF'
           #!/usr/bin/env python3
-          import os, sys, subprocess, time, hashlib
+          import os, sys, subprocess, time, hashlib, threading, queue
 
-          def get_file_set(dirpath):
-              if not os.path.isdir(dirpath):
-                  return set()
-              return {f for f in os.listdir(dirpath) if os.path.isfile(os.path.join(dirpath, f))}
+          def stream_output(pipe, q, prefix=''):
+              try:
+                  for line in iter(pipe.readline, ''):
+                      q.put((prefix, line.rstrip()))
+              finally:
+                  pipe.close()
 
           def download_with_retry(url, outdir, args_list, max_retries=3, delay=5):
               cmd = ['spotiflac', url, outdir] + args_list
               for attempt in range(1, max_retries + 1):
-                  print(f"Attempt {attempt} for {url}")
+                  print(f"\n{'='*60}")
+                  print(f"🔁 Attempt {attempt}/{max_retries} for: {url}")
+                  print(f"📁 Output: {outdir}")
+                  print(f"🔧 Command: {' '.join(cmd)}")
+                  print(f"{'='*60}\n")
+                  def get_file_set(dirpath):
+                      if not os.path.isdir(dirpath):
+                          return set()
+                      return {f for f in os.listdir(dirpath) if os.path.isfile(os.path.join(dirpath, f))}
                   before = get_file_set(outdir)
-                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                  q = queue.Queue()
+                  stdout_thread = threading.Thread(target=stream_output, args=(proc.stdout, q, '📢 '))
+                  stderr_thread = threading.Thread(target=stream_output, args=(proc.stderr, q, '⚠️ '))
+                  stdout_thread.start()
+                  stderr_thread.start()
+                  while stdout_thread.is_alive() or stderr_thread.is_alive() or not q.empty():
+                      try:
+                          prefix, line = q.get(timeout=0.1)
+                          print(f"{prefix}{line}")
+                      except queue.Empty:
+                          continue
+                  proc.wait()
+                  stdout_thread.join()
+                  stderr_thread.join()
                   after = get_file_set(outdir)
                   new_files = after - before
-                  if result.returncode == 0 and new_files:
-                      print(f"SUCCESS:{url} (new files: {len(new_files)})")
-                      if result.stdout:
-                          print(result.stdout)
+                  if proc.returncode == 0 and new_files:
+                      print(f"\n✅ SUCCESS: {url} (downloaded {len(new_files)} new file(s))")
                       return True
                   else:
-                      if result.returncode != 0:
-                          print(f"Attempt {attempt} failed: exit {result.returncode}", file=sys.stderr)
-                          if result.stderr:
-                              print(result.stderr, file=sys.stderr)
+                      if proc.returncode != 0:
+                          print(f"\n❌ Attempt {attempt} failed with exit code {proc.returncode}")
                       elif not new_files:
-                          print(f"Attempt {attempt} reported success but no new files", file=sys.stderr)
+                          print(f"\n⚠️ Attempt {attempt} reported success but no new files appeared")
                       if attempt < max_retries:
+                          print(f"⏳ Retrying in {delay} seconds...")
                           time.sleep(delay)
                       else:
-                          print(f"FAIL:{url}", file=sys.stderr)
+                          print(f"\n💀 FAIL: {url} after {max_retries} attempts")
                           return False
               return False
 
@@ -275,10 +296,17 @@ jobs:
               os.makedirs(output_base, exist_ok=True)
               folder_urls = []
               errors = []
+              total_links = len([l for l in links.splitlines() if l.strip()])
+              processed = 0
               for url in links.splitlines():
                   url = url.strip()
                   if not url:
                       continue
+                  processed += 1
+                  print(f"\n{'#'*60}")
+                  print(f"📥 Processing link {processed}/{total_links}")
+                  print(f"🔗 URL: {url}")
+                  print(f"{'#'*60}")
                   if '/track/' in url:
                       safe = url.split('/')[-1]
                   elif '/album/' in url:
@@ -300,7 +328,13 @@ jobs:
                       f.write(f"FAIL:{url}\n")
               with open('/tmp/timestamp.txt', 'w') as f:
                   f.write(timestamp)
-              print(f"Processed {len(folder_urls)} links, {len(errors)} failures.")
+              print(f"\n{'='*60}")
+              print(f"📊 SUMMARY: Processed {len(folder_urls)} links, {len(errors)} failures.")
+              if errors:
+                  print(f"❌ Failed URLs: {', '.join(errors)}")
+              else:
+                  print("✅ All downloads succeeded!")
+              print(f"{'='*60}")
           if __name__ == '__main__':
               main()
           PYEOF
@@ -350,44 +384,53 @@ jobs:
           TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
           BASE="downloads/$TIMESTAMP"
           echo "Converting audio files to .$TARGET (bitrate $BITRATE)"
-          # Supported input extensions
+          FILE_COUNT=$(find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No audio files found to convert. Skipping."
+            exit 0
+          fi
+          echo "Found $FILE_COUNT audio file(s) to convert."
+          CONVERT_FAILED=0
           find "$BASE" -type f \( -iname "*.flac" -o -iname "*.mp3" -o -iname "*.m4a" -o -iname "*.ogg" -o -iname "*.opus" -o -iname "*.wav" \) | while read -r f; do
             out="${f%.*}.$TARGET"
-            if [ "$TARGET" = "m4a" ]; then
-              # AAC in M4A container
-              ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
-            elif [ "$TARGET" = "mp3" ]; then
-              ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
-            elif [ "$TARGET" = "ogg" ]; then
-              ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
-            elif [ "$TARGET" = "opus" ]; then
-              ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
-            elif [ "$TARGET" = "wav" ]; then
-              ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -y "$out" 2>/dev/null
-            else
-              echo "Unknown target format: $TARGET, skipping $f"
+            if [ -f "$out" ]; then
+              echo "Output already exists: $(basename "$out") – skipping conversion for $(basename "$f")"
               continue
             fi
+            echo "Converting: $(basename "$f") → $(basename "$out")"
+            case "$TARGET" in
+              m4a)
+                ffmpeg -i "$f" -c:a aac -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ;;
+              mp3)
+                ffmpeg -i "$f" -c:a libmp3lame -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ;;
+              ogg)
+                ffmpeg -i "$f" -c:a libvorbis -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ;;
+              opus)
+                ffmpeg -i "$f" -c:a libopus -b:a "$BITRATE" -map_metadata 0 -y "$out" 2>/dev/null
+                ;;
+              wav)
+                ffmpeg -i "$f" -c:a pcm_s16le -map_metadata 0 -y "$out" 2>/dev/null
+                ;;
+              *)
+                echo "Unknown target format: $TARGET"
+                exit 1
+                ;;
+            esac
             if [ -f "$out" ]; then
-              echo "Converted: $(basename "$f") -> $(basename "$out")"
+              echo "✅ Converted: $(basename "$f") -> $(basename "$out")"
               rm "$f"
             else
-              echo "Conversion failed for $f"
+              echo "❌ Conversion failed for: $(basename "$f")"
+              CONVERT_FAILED=1
             fi
           done
-
-      # ========== SPLIT LARGE FILES (>95MB) FOR GIT ==========
-      - name: Split large files
-        if: github.event.inputs.storage_mode != 'artifact'
-        run: |
-          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
-          BASE="downloads/$TIMESTAMP"
-          find "$BASE" -type f ! -name "*.7z.*" -print0 | while IFS= read -r -d '' f; do
-            SIZE=$(stat -c%s "$f" 2>/dev/null)
-            if [ "$SIZE" -gt $((95*1048576)) ]; then
-              7z a -v95m -mx0 "$f.7z" "$f" && rm "$f"
-            fi
-          done
+          if [ "$CONVERT_FAILED" -eq 1 ]; then
+            echo "⚠️ Some conversions failed, but continuing workflow."
+          fi
+          echo "Conversion step finished."
 
       # ========== GENERATE METADATA (NOW AFTER CONVERSION/SPLIT) ==========
       - name: Generate per-download metadata
