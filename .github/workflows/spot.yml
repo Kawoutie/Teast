@@ -177,13 +177,13 @@ jobs:
           PROVIDER_MODE="${{ github.event.inputs.provider_mode }}"
           SPECIFIC="${{ github.event.inputs.specific_provider }}"
           if [ "$PROVIDER_MODE" = "lossless" ]; then
-            ARGS="$ARGS --service tidal qobuz deezer amazon apple"
+            ARGS="$ARGS -s tidal qobuz deezer amazon apple"
           elif [ "$PROVIDER_MODE" = "all" ]; then
-            ARGS="$ARGS --service tidal qobuz deezer amazon apple soundcloud youtube pandora"
+            ARGS="$ARGS -s tidal qobuz deezer amazon apple soundcloud youtube pandora"
           elif [ "$PROVIDER_MODE" = "specific" ] && [ -n "$SPECIFIC" ]; then
-            ARGS="$ARGS --service $SPECIFIC"
+            ARGS="$ARGS -s $SPECIFIC"
           fi
-          # auto mode: no --service flag
+          # auto mode: no -s flag
           ARGS="$ARGS --quality ${{ github.event.inputs.quality }}"
           if [ "${{ github.event.inputs.artist_subfolders }}" = "true" ]; then
             ARGS="$ARGS --use-artist-subfolders"
@@ -206,9 +206,8 @@ jobs:
               for attempt in range(1, max_retries + 1):
                   print(f"Attempt {attempt} for {url}")
                   try:
-                      clean_args = [x for x in args_list if x != '--output-dir']
-                      clean_args.extend(['--output-dir', outdir, url])
-                      SpotiFLAC(*clean_args)
+                      # Pass url and outdir as positional arguments, then the rest
+                      SpotiFLAC(url, outdir, *args_list)
                       print(f"SUCCESS:{url}")
                       return True
                   except Exception as e:
@@ -243,6 +242,7 @@ jobs:
                   url = url.strip()
                   if not url:
                       continue
+                  # Create safe subfolder name from track/album/playlist ID
                   if '/track/' in url:
                       safe = url.split('/')[-1]
                   elif '/album/' in url:
