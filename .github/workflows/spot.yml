@@ -588,55 +588,64 @@ jobs:
           STRUCTURE_MODE: ${{ github.event.inputs.structure_mode }}
 
       # ========== COMMIT AND PUSH ==========
-      - name: Commit and push to main
-        if: github.event.inputs.storage_mode == 'main'
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "SpotiFLAC Bot"
-          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
-          BATCH_SIZE=0
-          BATCH_NUM=1
-          > /tmp/batch_files.txt
-          find "downloads/$TIMESTAMP" -type f -print0 | while IFS= read -r -d '' f; do
-            SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
-            echo "$f" >> /tmp/batch_files.txt
-            BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
-            if [ $BATCH_SIZE -ge 1000 ]; then
-              echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
-              while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
-              git commit -m "SpotiFLAC $TIMESTAMP (batch $BATCH_NUM)" || true
-              git pull --rebase origin ${{ github.ref_name }} || true
-              git push
-              BATCH_NUM=$((BATCH_NUM + 1))
-              BATCH_SIZE=0
-              > /tmp/batch_files.txt
-            fi
-          done
-          if [ -s /tmp/batch_files.txt ]; then
-            while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
-            git commit -m "SpotiFLAC $TIMESTAMP (final)" || true
-            git pull --rebase origin ${{ github.ref_name }} || true
-            git push
-          fi
-          git add history/$TIMESTAMP/ INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg
-          git diff --cached --quiet || git commit -m "Update history for $TIMESTAMP" && git push
+- name: Commit and push to main
+  if: github.event.inputs.storage_mode == 'main'
+  run: |
+    git config --local user.email "action@github.com"
+    git config --local user.name "SpotiFLAC Bot"
+    TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
+    
+    # Disable sparse-checkout so we can add root-level files
+    git sparse-checkout disable
+    
+    BATCH_SIZE=0
+    BATCH_NUM=1
+    > /tmp/batch_files.txt
+    find "downloads/$TIMESTAMP" -type f -print0 | while IFS= read -r -d '' f; do
+      SZ=$(stat -c%s "$f" 2>/dev/null || echo 0)
+      echo "$f" >> /tmp/batch_files.txt
+      BATCH_SIZE=$((BATCH_SIZE + SZ/1048576))
+      if [ $BATCH_SIZE -ge 1000 ]; then
+        echo "Committing batch $BATCH_NUM ($BATCH_SIZE MB)"
+        while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
+        git commit -m "SpotiFLAC $TIMESTAMP (batch $BATCH_NUM)" || true
+        git pull --rebase origin ${{ github.ref_name }} || true
+        git push
+        BATCH_NUM=$((BATCH_NUM + 1))
+        BATCH_SIZE=0
+        > /tmp/batch_files.txt
+      fi
+    done
+    if [ -s /tmp/batch_files.txt ]; then
+      while IFS= read -r line; do git add --sparse "$line"; done < /tmp/batch_files.txt
+      git commit -m "SpotiFLAC $TIMESTAMP (final)" || true
+      git pull --rebase origin ${{ github.ref_name }} || true
+      git push
+    fi
+    
+    # Now add the root-level files (they are outside sparse-checkout, but we disabled it)
+    git add history/$TIMESTAMP/ INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg
+    git diff --cached --quiet || git commit -m "Update history for $TIMESTAMP" && git push
 
-      - name: Push to orphan branch
-        if: github.event.inputs.storage_mode == 'branch'
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "SpotiFLAC Bot"
-          TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
-          BRANCH="spotiflac-$TIMESTAMP"
-          git checkout --orphan "$BRANCH"
-          git reset --hard
-          mv "downloads/$TIMESTAMP"/* .
-          mkdir -p history && mv "history/$TIMESTAMP" history/ 2>/dev/null || true
-          cp INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg . 2>/dev/null || true
-          git add .
-          git commit -m "SpotiFLAC download $TIMESTAMP"
-          git push -u origin "$BRANCH"
-
+- name: Push to orphan branch
+  if: github.event.inputs.storage_mode == 'branch'
+  run: |
+    git config --local user.email "action@github.com"
+    git config --local user.name "SpotiFLAC Bot"
+    TIMESTAMP="${{ steps.spotify_download.outputs.timestamp }}"
+    BRANCH="spotiflac-$TIMESTAMP"
+    
+    # Disable sparse-checkout before switching branches
+    git sparse-checkout disable
+    git checkout --orphan "$BRANCH"
+    git reset --hard
+    mv "downloads/$TIMESTAMP"/* .
+    mkdir -p history && mv "history/$TIMESTAMP" history/ 2>/dev/null || true
+    cp INDEX.md BOOTSTRAP.md .trigger.template history/README.md history/badge.svg . 2>/dev/null || true
+    git add .
+    git commit -m "SpotiFLAC download $TIMESTAMP"
+    git push -u origin "$BRANCH"
+    
       - name: Upload artifact
         if: github.event.inputs.storage_mode == 'artifact'
         uses: actions/upload-artifact@v4
